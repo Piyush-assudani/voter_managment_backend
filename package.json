@@ -4,11 +4,15 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node test/comprehensive_stress_test.js && node test/monkey_edge_case_test.js",
     "start": "node index.js",
     "dev": "nodemon index.js",
     "test:e2e": "node test/e2e-smoke.js",
-    "test:chaos": "node test/chaos-stress-test.js"
+    "test:chaos": "node test/chaos-stress-test.js",
+    "test:stress": "node test/comprehensive_stress_test.js",
+    "test:monkey": "node test/monkey_edge_case_test.js",
+    "test:family": "node test/test_family_service.js",
+    "test:glyph": "node tests/glyph_repair.test.js"
   },
   "keywords": [],
   "author": "",
@@ -35,7 +39,8 @@
     "pdf-to-png-converter": "^4.2.1",
     "pg": "^8.23.1",
     "tesseract.js": "^7.0.0",
-    "winston": "^3.19.0"
+    "winston": "^3.19.0",
+    "cloudinary": "^2.11.0"
   },
   "devDependencies": {
     "mongodb-memory-server": "^11.3.0",

@@ -3,38 +3,63 @@ const router = express.Router();
 const cache = require('../lib/cache');
 const { formatVoter } = require('./features');
 const { verifyToken, requireModule } = require('../middleware/authMiddleware');
-const { addVoterAccess } = require('../lib/access');
-const { Voter, Organization } = require('../models/index');
+const { addVoterAccess, getEffectiveOrgId } = require('../lib/access');
+const { escapeRegex, safeRegex, latinToDevanagariRegex } = require('../lib/regexUtils');
+const { normalizeDevanagariDigits } = require('../lib/phoneUtils');
+const { Voter, User, Organization, SystemSetting } = require('../models/index');
+
+const DEFAULT_CASTES = [
+  'भाट',
+  'ब्राह्मण',
+  'शर्मा',
+  'पालीवाल',
+  'जोगी',
+  'जाट',
+  'राजपूत',
+  'चौधरी',
+  'बिश्नोई',
+  'भील',
+  'देवासी / रबारी',
+  'माहेश्वरी / वैश्य',
+  'कुम्हार / प्रजापत',
+  'सुथार / खाती',
+  'सैन / नाई',
+  'मुस्लिम',
+  'मेघवाल',
+  'लोहार',
+  'राव',
+  'गुर्जर',
+];
 
 const boundedInteger = (value, fallback, maximum) => {
   const parsed = Number.parseInt(value, 10);
   return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, maximum) : fallback;
 };
 
-const escapeRegex = (value) => (typeof value === 'string' ? value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '');
-
-const {
-  buildDevanagariSearchRegex,
-  getHindiPhoneticCandidates,
-} = require('../lib/phoneticSearch');
-
-
 const buildWardFilterCondition = (ward) => {
-  if (typeof ward !== 'string' || !ward.trim()) return null;
-  const rawWard = ward.trim();
-  const cleanWard = rawWard.replace(/^(वार्ड|Ward)\s*/i, '').trim();
-  const escaped = cleanWard.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const wardRegex = new RegExp(`^(\\s*(वार्ड|Ward)\\s*)?0*${escaped}\\s*$`, 'i');
-  const wardNum = Number.parseInt(cleanWard, 10);
-  if (!Number.isNaN(wardNum)) {
-    return {
-      $or: [
-        { wardNo: wardRegex },
-        { wardNo: wardNum }
-      ]
-    };
+  if (!ward) return null;
+  const wardList = Array.isArray(ward)
+    ? ward
+    : typeof ward === 'string'
+      ? ward.split(',').map((w) => w.trim()).filter(Boolean)
+      : [];
+  if (wardList.length === 0 || wardList.includes('all')) return null;
+
+  const conditions = [];
+  for (const rawWard of wardList) {
+    const cleanWard = String(rawWard).trim().replace(/^(वार्ड|Ward)\s*/i, '').trim();
+    if (!cleanWard) continue;
+    const escaped = cleanWard.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const wardRegex = new RegExp(`^(\\s*(वार्ड|Ward)\\s*)?0*${escaped}\\s*$`, 'i');
+    const wardNum = Number.parseInt(cleanWard, 10);
+    conditions.push({ wardNo: wardRegex });
+    if (!Number.isNaN(wardNum)) {
+      conditions.push({ wardNo: wardNum });
+    }
   }
-  return { wardNo: wardRegex };
+
+  if (conditions.length === 0) return null;
+  return { $or: conditions };
 };
 
 const applyWardFilter = (query, ward) => {
@@ -53,6 +78,69 @@ const applyWardFilter = (query, ward) => {
     query.wardNo = cond.wardNo;
   }
 };
+
+const buildPanchayatFilterCondition = (panchayat) => {
+  if (typeof panchayat !== 'string' || !panchayat.trim()) return null;
+  const cleanP = panchayat.trim().replace(/^(पंचायत|ग्राम पंचायत)\s*/i, '').trim();
+  const escaped = cleanP.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return { panchayat: new RegExp(`^(\\s*(पंचायत|ग्राम पंचायत)\\s*)?${escaped}\\s*$`, 'i') };
+};
+
+const applyPanchayatFilter = (query, panchayat) => {
+  const cond = buildPanchayatFilterCondition(panchayat);
+  if (!cond) return;
+  query.panchayat = cond.panchayat;
+};
+
+// Get dynamic caste / community options (User-specific -> Org-specific -> Global -> Default)
+const getCasteOptionsHandler = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    const orgId = req.user?.organizationId || getEffectiveOrgId(req);
+
+    // 1. Check user-level caste options
+    if (userId) {
+      const userDoc = await User.findById(userId).select('casteOptions').lean();
+      if (userDoc && Array.isArray(userDoc.casteOptions) && userDoc.casteOptions.length > 0) {
+        return res.json({ casteOptions: userDoc.casteOptions, source: 'user' });
+      }
+    }
+
+    // 2. Check organization-level caste options
+    if (orgId) {
+      const orgDoc = await Organization.findById(orgId).select('casteOptions settings').lean();
+      if (orgDoc && Array.isArray(orgDoc.casteOptions) && orgDoc.casteOptions.length > 0) {
+        return res.json({ casteOptions: orgDoc.casteOptions, source: 'organization' });
+      }
+      if (orgDoc && orgDoc.settings && Array.isArray(orgDoc.settings.casteOptions) && orgDoc.settings.casteOptions.length > 0) {
+        return res.json({ casteOptions: orgDoc.settings.casteOptions, source: 'organization' });
+      }
+    }
+
+    // 3. Check system global setting
+    const globalSetting = await SystemSetting.findById('caste_options').lean();
+    if (globalSetting && Array.isArray(globalSetting.value) && globalSetting.value.length > 0) {
+      return res.json({ casteOptions: globalSetting.value, source: 'global' });
+    }
+
+    // 4. Default list
+    return res.json({ casteOptions: DEFAULT_CASTES, source: 'default' });
+  } catch (err) {
+    console.error('Error fetching caste options:', err);
+    return res.json({ casteOptions: DEFAULT_CASTES, source: 'fallback' });
+  }
+};
+router.get('/caste-options', verifyToken, getCasteOptionsHandler);
+router.get('/castes', verifyToken, async (req, res) => {
+  try {
+    const orgId = req.user?.organizationId || getEffectiveOrgId(req);
+    const org = await Organization.findById(orgId).lean();
+    const castes = org?.casteOptions || org?.customCastes || DEFAULT_CASTES;
+    res.json({ success: true, castes, casteOptions: castes });
+  } catch (err) {
+    res.json({ success: true, castes: DEFAULT_CASTES, casteOptions: DEFAULT_CASTES });
+  }
+});
 
 // Get ALL voters (for Turnout / Analytics)
 router.get('/all', verifyToken, requireModule('voters', 'poll-desk', 'turnout', 'warroom'), async (req, res) => {
@@ -265,7 +353,7 @@ router.get('/wards-summary', verifyToken, requireModule('voters', 'community', '
     const cacheKey = `wards_summary_${orgId}_${req.user.id}`;
     const cached = cache.get(cacheKey);
     if (cached) return res.json(cached);
-    const [rawWards, total, rawFamilies] = await Promise.all([
+    const [rawWards, total, familyFacet] = await Promise.all([
       Voter.aggregate([
         { $match: query },
         { $group: { _id: '$wardNo', count: { $sum: 1 } } }
@@ -285,7 +373,9 @@ router.get('/wards-summary', verifyToken, requireModule('voters', 'community', '
           $group: {
             _id: {
               houseNo: '$houseNo',
-              wardNo: { $ifNull: ['$wardNo', ''] }
+              wardNo: { $ifNull: ['$wardNo', ''] },
+              panchayat: { $ifNull: ['$panchayat', ''] },
+              partNo: { $ifNull: ['$partNo', ''] }
             }
           }
         },
@@ -300,7 +390,7 @@ router.get('/wards-summary', verifyToken, requireModule('voters', 'community', '
         if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
         return String(a._id).localeCompare(String(b._id));
       });
-    const totalFamilies = rawFamilies[0]?.totalFamilies || 0;
+    const totalFamilies = familyFacet?.[0]?.totalFamilies || 0;
     const result = { wards, total, totalFamilies };
     cache.set(cacheKey, result, 300);
     res.json(result);
@@ -310,35 +400,60 @@ router.get('/wards-summary', verifyToken, requireModule('voters', 'community', '
   }
 });
 
+// Get unique panchayats list with counts for current organization (Cached 5m)
+router.get('/panchayats-summary', verifyToken, requireModule('voters', 'community', 'poll-desk'), async (req, res) => {
+  try {
+    const query = addVoterAccess(req);
+    const orgId = query.organizationId || req.user.organizationId || 'org_default';
+    const cacheKey = `panchayats_summary_${orgId}_${req.user.id}`;
+    const cached = cache.get(cacheKey);
+    if (cached) return res.json(cached);
+    const rawPanchayats = await Voter.aggregate([
+      { $match: { ...query, panchayat: { $exists: true, $ne: '' } } },
+      { $group: { _id: '$panchayat', count: { $sum: 1 } } }
+    ]);
+    const panchayats = rawPanchayats
+      .filter((p) => p._id !== null && p._id !== undefined && String(p._id).trim() !== '')
+      .sort((a, b) => String(a._id).localeCompare(String(b._id)));
+    const total = await Voter.countDocuments(query);
+    const result = { panchayats, total };
+    cache.set(cacheKey, result, 300);
+    res.json(result);
+  } catch (err) {
+    console.error('Panchayats summary failed:', err.message);
+    res.status(500).json({ message: 'Panchayats could not be loaded.' });
+  }
+});
+
 // High-performance Paginated Households for Family Voter Slips (Cached 60s)
 router.get('/households', verifyToken, requireModule('voters', 'community'), async (req, res) => {
   try {
     const page = boundedInteger(req.query.page, 1, 10000);
     const limit = boundedInteger(req.query.limit, 30, 100);
     const skip = (page - 1) * limit;
-    const { ward, part, search } = req.query;
+    const { ward, panchayat, part, search } = req.query;
 
     const query = addVoterAccess(req);
     applyWardFilter(query, ward);
+    applyPanchayatFilter(query, panchayat);
     if (typeof part === 'string' && part.trim()) {
-      query.partNo = new RegExp(`^${escapeRegex(part.trim().replace(/^(भाग|Part)\s*/i, ''))}$`, 'i');
+      const cleanPart = part.trim().replace(/^(भाग|Part)\s*/i, '');
+      const partRegex = safeRegex(`^${cleanPart}$`);
+      if (partRegex) query.partNo = partRegex;
     }
     if (typeof search === 'string' && search.trim()) {
-      const q = search.trim().slice(0, 100);
-      const searchRegex = new RegExp(escapeRegex(q), 'i');
-      query.$or = [
-        { houseNo: searchRegex },
-        { nameHi: searchRegex },
-        { nameEn: searchRegex },
-        { epic: searchRegex }
-      ];
-      const devRegex = buildDevanagariSearchRegex(q);
-      if (devRegex) {
-        query.$or.push({ nameHi: devRegex });
-      }
-      const phoneticCandidates = getHindiPhoneticCandidates(q);
-      for (const cand of phoneticCandidates) {
-        query.$or.push({ nameHi: new RegExp(escapeRegex(cand), 'i') });
+      const searchRegex = safeRegex(search);
+      const latinDevRegex = latinToDevanagariRegex(search);
+      if (searchRegex) {
+        query.$or = [
+          { houseNo: searchRegex },
+          { nameHi: searchRegex },
+          { nameEn: searchRegex },
+          { epic: searchRegex }
+        ];
+        if (latinDevRegex) {
+          query.$or.push({ nameHi: latinDevRegex });
+        }
       }
     }
 
@@ -351,7 +466,7 @@ router.get('/households', verifyToken, requireModule('voters', 'community'), asy
     );
 
     const orgId = query.organizationId || req.user.organizationId || 'org_default';
-    const cacheKey = `households_${orgId}_${req.user.id}_w${ward || ''}_p${part || ''}_s${search || ''}_p${page}_l${limit}`;
+    const cacheKey = `households_${orgId}_${req.user.id}_w${ward || ''}_pn${panchayat || ''}_p${part || ''}_s${search || ''}_p${page}_l${limit}`;
     const cached = cache.get(cacheKey);
     if (cached) return res.json(cached);
 
@@ -362,6 +477,7 @@ router.get('/households', verifyToken, requireModule('voters', 'community'), asy
           _id: {
             houseNo: '$houseNo',
             wardNo: { $ifNull: ['$wardNo', ''] },
+            panchayat: { $ifNull: ['$panchayat', ''] },
             partNo: { $ifNull: ['$partNo', ''] }
           },
           memberCount: { $sum: 1 },
@@ -380,11 +496,18 @@ router.get('/households', verifyToken, requireModule('voters', 'community'), asy
               epic: '$epic',
               houseNo: '$houseNo',
               wardNo: '$wardNo',
+              panchayat: '$panchayat',
               partNo: '$partNo',
               familyHead: '$familyHead',
               phone: { $ifNull: ['$mobileNo', '$phone'] },
               mobileNo: { $ifNull: ['$mobileNo', '$phone'] },
-              boothName: '$boothName'
+              boothName: '$boothName',
+              caste: { $ifNull: ['$caste', ''] },
+              surety: { $ifNull: ['$surety', ''] },
+              supportStatus: { $ifNull: ['$supportStatus', 'unmarked'] },
+              isMigrant: { $ifNull: ['$isMigrant', false] },
+              migrantLocation: { $ifNull: ['$migrantLocation', ''] },
+              photoUrl: { $ifNull: ['$photoUrl', ''] }
             }
           }
         }
@@ -408,14 +531,17 @@ router.get('/households', verifyToken, requireModule('voters', 'community'), asy
       const headVoter = members.find((m) => m.familyHead && (m.familyHead === m.nameHi || m.familyHead === m.nameEn))
         || [...members].sort((a, b) => (Number(b.age) || 0) - (Number(a.age) || 0))[0]
         || members[0];
+      const caste = members.find((m) => m.caste)?.caste || '';
       return {
         key: `${wardNo}_${partNo}_${houseNo}`,
         houseNo,
         wardNo,
+        panchayat: item._id.panchayat || '',
         partNo,
         members,
         memberCount: item.memberCount,
-        headName: headVoter?.nameHi || headVoter?.nameEn || item.headName || 'मुखिया'
+        headName: headVoter?.nameHi || headVoter?.nameEn || item.headName || 'मुखिया',
+        caste
       };
     });
 
@@ -443,104 +569,132 @@ router.get('/households', verifyToken, requireModule('voters', 'community'), asy
 // Get all voters (with search & pagination)
 router.get('/', verifyToken, requireModule('voters', 'community', 'workers', 'migrants'), async (req, res) => {
   try {
-    const { search, relative, ward, part, house, isMigrant, supportStatus, caste, assignedWorker, gender } = req.query;
+    const { search, relative, ward, panchayat, part, house, isMigrant, supportStatus, caste, assignedWorker, status, gender } = req.query;
     const query = addVoterAccess(req);
 
-    const isSearching = Boolean((search && search.trim()) || (relative && relative.trim()));
-    const orgId = query.organizationId || req.user.organizationId || 'org_default';
-    const isAll = req.query.all === 'true' || req.query.all === '1';
-    const page = boundedInteger(req.query.page, 1, 100000);
-    const pageSize = boundedInteger(req.query.pageSize, 100, 10000);
-
-    // High-speed O(1) Cache for repeated searches and rapid typing
-    const cacheKey = isSearching
-      ? `voter_search_${orgId}_${encodeURIComponent((search || '').trim().toLowerCase())}_${encodeURIComponent((relative || '').trim().toLowerCase())}_w${ward || ''}_p${part || ''}_c${encodeURIComponent((caste || '').trim().toLowerCase())}_g${encodeURIComponent((gender || '').trim().toLowerCase())}_pg${page}_sz${pageSize}`
-      : null;
-    if (cacheKey) {
-      const cached = cache.get(cacheKey);
-      if (cached) return res.json(cached);
-    }
-
     if (typeof search === 'string' && search.trim()) {
-      const trimmed = search.trim().slice(0, 100).replace(/\s+/g, ' ');
-      const escaped = escapeRegex(trimmed);
-      const searchRegex = new RegExp(escaped, 'i');
-      query.$or = [
-        { nameHi: searchRegex },
-        { nameEn: searchRegex },
-        { epic: searchRegex },
-        { relativeNameHi: searchRegex },
-        { relativeNameEn: searchRegex },
-        { houseNo: searchRegex },
-        { mobileNo: searchRegex }
-      ];
+      const trimmed = search.trim().slice(0, 100);
+      const searchRegex = safeRegex(trimmed);
+      const latinDevRegex = latinToDevanagariRegex(trimmed);
+      const isExplicitVoterId = /^voter/i.test(trimmed);
+      const isAsciiWord = /^[a-z]+$/i.test(trimmed);
 
-      // 1. Advanced Devanagari regex for Hindi voter records (handles -न्द्र, schwa, compound suffixes)
-      const devRegex = buildDevanagariSearchRegex(trimmed);
-      if (devRegex) {
-        query.$or.push({ nameHi: devRegex });
-        query.$or.push({ relativeNameHi: devRegex });
+      const orConditions = [];
+
+      // 1. Direct regex match on name fields
+      if (searchRegex) {
+        orConditions.push({ nameHi: searchRegex });
+        orConditions.push({ nameEn: searchRegex });
       }
 
-      // 2. Direct phonetic sound candidates
-      const phoneticCandidates = getHindiPhoneticCandidates(trimmed);
-      for (const cand of phoneticCandidates) {
-        const candRegex = new RegExp(escapeRegex(cand), 'i');
-        query.$or.push({ nameHi: candRegex });
-        query.$or.push({ relativeNameHi: candRegex });
+      // If input is English/Latin, match via phonetic Devanagari regex
+      if (latinDevRegex) {
+        if (trimmed.length <= 3 && isAsciiWord) {
+          // For short queries like "p", "bu", "ma", match start of name or start of any word in name
+          const prefixPattern = new RegExp('(^|\\s)(' + latinDevRegex.source + ')', 'i');
+          orConditions.push({ nameHi: prefixPattern });
+          orConditions.push({ nameEn: prefixPattern });
+        } else {
+          orConditions.push({ nameHi: latinDevRegex });
+          orConditions.push({ nameEn: latinDevRegex });
+        }
       }
 
+      // 2. EPIC match: do NOT match internal fallback placeholder IDs (e.g. VOTER_W1_P5091_...)
+      if (isExplicitVoterId) {
+        orConditions.push({ epic: searchRegex });
+      } else if (trimmed.length < 3) {
+        // For 1-2 char queries, only match if a real EPIC number actually starts with it (e.g. "SSB", "RJ")
+        orConditions.push({
+          $and: [
+            { epic: new RegExp('^' + escapeRegex(trimmed), 'i') },
+            { epic: { $not: /^VOTER_/i } }
+          ]
+        });
+      } else {
+        // For 3+ char queries, match real EPIC containing it, but NEVER match fallback ^VOTER_ IDs
+        orConditions.push({
+          $and: [
+            { epic: searchRegex },
+            { epic: { $not: /^VOTER_/i } }
+          ]
+        });
+      }
+
+      // 3. Serial number match (exact integer)
       const parsedSerial = Number.parseInt(trimmed, 10);
       if (!Number.isNaN(parsedSerial) && String(parsedSerial) === trimmed) {
-        query.$or.push({ serialNo: parsedSerial });
+        orConditions.push({ serialNo: parsedSerial });
       }
+
+      // 4. Mobile number match (only if 3-10 digits)
+      if (/^\d{3,10}$/.test(trimmed) && searchRegex) {
+        orConditions.push({ mobileNo: searchRegex });
+      }
+
+      query.$or = orConditions;
     }
     
     if (typeof relative === 'string' && relative.trim()) {
-      const trimmedRelative = relative.trim().slice(0, 100).replace(/\s+/g, ' ');
-      const escapedRelative = escapeRegex(trimmedRelative);
-      const relativeRegex = new RegExp(escapedRelative, 'i');
-      const relDevRegex = buildDevanagariSearchRegex(trimmedRelative);
-      const relCandidates = getHindiPhoneticCandidates(trimmedRelative);
-      const relConditions = [
-        { relativeNameHi: relativeRegex },
-        { relativeNameEn: relativeRegex },
-        ...(relDevRegex ? [{ relativeNameHi: relDevRegex }] : []),
-        ...relCandidates.map((c) => ({ relativeNameHi: new RegExp(escapeRegex(c), 'i') }))
-      ];
-      if (query.$or) {
-        query.$and = [{ $or: query.$or }, { $or: relConditions }];
-        delete query.$or;
-      } else {
-        query.$or = relConditions;
+      const relTrimmed = relative.trim().slice(0, 100);
+      const relativeRegex = safeRegex(relTrimmed);
+      const relLatinDevRegex = latinToDevanagariRegex(relTrimmed);
+      if (relativeRegex) {
+        const relConditions = [{ relativeNameHi: relativeRegex }, { relativeNameEn: relativeRegex }];
+        if (relLatinDevRegex) {
+          relConditions.push({ relativeNameHi: relLatinDevRegex });
+        }
+        if (query.$or) {
+          query.$and = [{ $or: query.$or }, { $or: relConditions }];
+          delete query.$or;
+        } else {
+          query.$or = relConditions;
+        }
       }
     }
     
     applyWardFilter(query, ward);
+    applyPanchayatFilter(query, panchayat);
     if (typeof part === 'string' && part.trim()) {
-      const cleanPart = escapeRegex(part.trim().replace(/^(भाग|Part)\s*/i, ''));
-      query.partNo = new RegExp(`^${cleanPart}$`, 'i');
+      const cleanPart = part.trim().replace(/^(भाग|Part)\s*/i, '');
+      const partRegex = safeRegex(cleanPart);
+      if (partRegex) query.partNo = partRegex;
     }
-    if (typeof house === 'string' && house.trim()) query.houseNo = new RegExp(escapeRegex(house.trim()), 'i');
+    if (typeof house === 'string' && house.trim()) {
+      const houseRegex = safeRegex(house);
+      if (houseRegex) query.houseNo = houseRegex;
+    }
     if (isMigrant === 'true' || isMigrant === 'false') query.isMigrant = isMigrant === 'true';
     if (typeof supportStatus === 'string' && ['core', 'swing', 'opposition', 'unmarked'].includes(supportStatus)) {
       query.supportStatus = supportStatus;
     }
-    if (typeof caste === 'string' && caste.trim()) query.caste = new RegExp(`^${escapeRegex(caste.trim())}$`, 'i');
+    if (typeof caste === 'string' && caste.trim()) {
+      const casteRegex = safeRegex(caste);
+      if (casteRegex) query.caste = casteRegex;
+    }
+    if (typeof assignedWorker === 'string' && assignedWorker.trim()) {
+      const workerRegex = safeRegex(assignedWorker);
+      if (workerRegex) query.assignedWorker = workerRegex;
+    }
+    if (typeof status === 'string' && status.trim()) {
+      query.status = status.trim();
+    }
     if (typeof gender === 'string' && gender.trim()) {
       const g = gender.trim();
-      if (['पुरुष', 'male', 'm'].includes(g.toLowerCase()) || g === 'पुरुष') {
-        query.gender = { $in: ['पुरुष', 'Male', 'M', 'male'] };
-      } else if (['महिला', 'स्त्री', 'female', 'f'].includes(g.toLowerCase()) || g === 'महिला' || g === 'स्त्री') {
+      if (['पुरुष', 'Male', 'M', 'male'].includes(g)) {
+        query.gender = { $in: ['पुरुष', 'पुरूष', 'Male', 'M', 'male'] };
+      } else if (['स्त्री', 'महिला', 'Female', 'F', 'female'].includes(g)) {
         query.gender = { $in: ['स्त्री', 'महिला', 'Female', 'F', 'female'] };
-      } else if (['अन्य', 'other', 'tg'].includes(g.toLowerCase()) || g === 'अन्य') {
-        query.gender = { $in: ['अन्य', 'Other', 'TG', 'other'] };
       } else {
-        query.gender = new RegExp(`^${escapeRegex(g)}$`, 'i');
+        const genderRegex = safeRegex(g);
+        if (genderRegex) query.gender = genderRegex;
       }
     }
-    if (typeof assignedWorker === 'string' && assignedWorker.trim()) query.assignedWorker = new RegExp(escapeRegex(assignedWorker.trim()), 'i');
 
+    const isAll = req.query.all === 'true' || req.query.all === '1';
+    const page = boundedInteger(req.query.page, 1, 100000);
+    const pageSize = boundedInteger(req.query.pageSize, 100, 10000);
+    
     // Execute count and paginated query in parallel for 2x faster responses
     const voterQuery = Voter.find(query)
       .sort({ wardNo: 1, partNo: 1, serialNo: 1 })
@@ -559,19 +713,14 @@ router.get('/', verifyToken, requireModule('voters', 'community', 'workers', 'mi
 
     const formattedVoters = voters.map((v) => ({
       ...v,
+      houseNo: v.houseNo ? String(v.houseNo).replace(/^0+(\d+)/, '$1') : '',
       phone: v.mobileNo || v.phone || '',
       mobileNo: v.mobileNo || v.phone || '',
     }));
       
-    const payload = req.query.page || req.query.pageSize || isAll
+    res.json(req.query.page || req.query.pageSize || isAll
       ? { data: formattedVoters, page: isAll ? 1 : page, pageSize: isAll ? count : pageSize, total: count }
-      : formattedVoters;
-
-    if (cacheKey) {
-      cache.set(cacheKey, payload, 60);
-    }
-
-    res.json(payload);
+      : formattedVoters);
   } catch (err) {
     console.error('Voter search failed:', err.message);
     res.status(500).json({ message: 'Voter records could not be loaded.' });
@@ -698,6 +847,10 @@ router.put('/:id', verifyToken, (req, res, next) => {
       villageName: 'villageName',
       villageNameHi: 'villageNameHi',
       occupation: 'occupation',
+      panchayat: 'panchayat',
+      panchayatHi: 'panchayatHi',
+      voted: 'voted',
+      photoUrl: 'photoUrl',
     };
     
     const updates = {};
@@ -705,11 +858,14 @@ router.put('/:id', verifyToken, (req, res, next) => {
       if (Object.hasOwn(req.body, key)) {
         const val = req.body[key];
         if (key === 'age') {
-          const numAge = Number.parseInt(val, 10);
+          const numAge = Number.parseInt(normalizeDevanagariDigits(val), 10);
           updates[dbColumn] = !isNaN(numAge) && numAge >= 18 && numAge <= 125 ? numAge : null;
         } else if (key === 'serialNo') {
-          const numSerial = Number.parseInt(val, 10);
+          const numSerial = Number.parseInt(normalizeDevanagariDigits(val), 10);
           updates[dbColumn] = !isNaN(numSerial) && numSerial > 0 ? numSerial : null;
+        } else if (key === 'phone' || key === 'mobileNo') {
+          const cleanPh = normalizeDevanagariDigits(String(val || '')).replace(/\D/g, '').slice(-10);
+          updates[dbColumn] = cleanPh;
         } else if (key === 'voted' || key === 'isMigrant') {
           updates[dbColumn] = Boolean(val);
         } else if (key === 'nameHi' && typeof val === 'string') {
@@ -740,18 +896,35 @@ router.put('/:id', verifyToken, (req, res, next) => {
       query._id = id;
     }
     
+    const existingVoter = await Voter.findOne(query).select('nameHi relativeNameHi').lean();
     const voter = await Voter.findOneAndUpdate(query, { $set: updates }, { returnDocument: 'after' }).lean();
     
     if (!voter) return res.status(404).json({ message: 'Voter not found or access denied.' });
 
+    // 🧠 Dynamic Self-Learning Dictionary Feedback Loop:
+    // If admin or client manually corrected nameHi or relativeNameHi, save correction permanently!
+    try {
+      const { learnNameCorrection } = require('../lib/dictionaryService');
+      if (updates.nameHi && existingVoter && existingVoter.nameHi !== updates.nameHi) {
+        void learnNameCorrection(existingVoter.nameHi, updates.nameHi, `voter_edit_${voter._id}`);
+      } else if (updates.nameHi) {
+        void learnNameCorrection('', updates.nameHi, `voter_edit_${voter._id}`);
+      }
+
+      if (updates.relativeNameHi && existingVoter && existingVoter.relativeNameHi !== updates.relativeNameHi) {
+        void learnNameCorrection(existingVoter.relativeNameHi, updates.relativeNameHi, `voter_rel_edit_${voter._id}`);
+      } else if (updates.relativeNameHi) {
+        void learnNameCorrection('', updates.relativeNameHi, `voter_rel_edit_${voter._id}`);
+      }
+    } catch (learnErr) {
+      console.warn('[VotersRoute] learnNameCorrection warning:', learnErr.message);
+    }
+
     // Invalidate Cache for this organization
     const orgKey = query.organizationId || req.user.organizationId || 'org_default';
     cache.delPrefix(`voters_all_${orgKey}_`);
-    cache.delPrefix(`voter_search_${orgKey}_`);
-    cache.delPrefix(`households_${orgKey}_`);
     cache.delPrefix(`wards_summary_${orgKey}_`);
     cache.delPrefix(`turnout_summary_${orgKey}_`);
-    cache.delPrefix(`war_room_${orgKey}_`);
 
     res.json(voter);
   } catch (err) {
@@ -777,16 +950,18 @@ router.put('/:id/vote', verifyToken, requireModule('poll-desk', 'turnout'), asyn
       query._id = id;
     }
     
-    const voter = await Voter.findOneAndUpdate(query, { $set: { voted } }, { returnDocument: 'after' });
+    const voter = await Voter.findOneAndUpdate(
+      query,
+      { $set: { voted, votedAt: voted ? new Date() : null } },
+      { returnDocument: 'after' }
+    );
     
     if (!voter) return res.status(404).json({ message: 'Voter not found or access denied.' });
     
     // Invalidate Cache for this organization
     const orgKey = query.organizationId || req.user.organizationId || 'org_default';
     cache.delPrefix(`voters_all_${orgKey}_`);
-    cache.delPrefix(`voter_search_${orgKey}_`);
     cache.delPrefix(`turnout_summary_${orgKey}_`);
-    cache.delPrefix(`war_room_${orgKey}_`);
     
     res.json({ success: true, message: 'Vote status updated.' });
   } catch (err) {
@@ -829,6 +1004,150 @@ router.delete('/:id', verifyToken, async (req, res) => {
   }
 });
 
+// BULK UPDATE voters (Tagging, Caste, Support, Migrant, Phone, Notes)
+const bulkUpdateHandler = async (req, res) => {
+  try {
+    const { ids, updates, houseNo, wardNo } = req.body;
+    if ((!Array.isArray(ids) || ids.length === 0) && !houseNo) {
+      return res.status(400).json({ message: 'अपडेट के लिए मतदाता IDs या परिवार मकान नंबर आवश्यक है।' });
+    }
+
+    const safeUpdates = {};
+    if (Object.hasOwn(updates || {}, 'caste')) safeUpdates.caste = String(updates.caste || '').trim();
+    if (Object.hasOwn(updates || {}, 'supportStatus')) {
+      const st = updates.supportStatus;
+      if (['core', 'swing', 'opposition', 'unmarked'].includes(st)) {
+        safeUpdates.supportStatus = st;
+        if (st === 'core') safeUpdates.surety = '100% पक्का';
+        else if (st === 'swing') safeUpdates.surety = '50-50';
+        else if (st === 'opposition') safeUpdates.surety = 'विरोधी';
+        else if (st === 'unmarked') safeUpdates.surety = 'सामान्य';
+      }
+    }
+    if (Object.hasOwn(updates || {}, 'surety')) {
+      safeUpdates.surety = String(updates.surety || '').trim();
+      if (safeUpdates.surety === '100% पक्का') safeUpdates.supportStatus = 'core';
+      else if (safeUpdates.surety === '50-50') safeUpdates.supportStatus = 'swing';
+      else if (safeUpdates.surety === 'विरोधी') safeUpdates.supportStatus = 'opposition';
+      else if (safeUpdates.surety === 'सामान्य') safeUpdates.supportStatus = 'unmarked';
+    }
+    if (Object.hasOwn(updates || {}, 'isMigrant')) {
+      safeUpdates.isMigrant = Boolean(updates.isMigrant);
+      if (updates.migrantLocation) safeUpdates.migrantLocation = String(updates.migrantLocation).trim();
+    }
+    if (Object.hasOwn(updates || {}, 'mobileNo') || Object.hasOwn(updates || {}, 'phone')) {
+      const rawPh = String(updates.mobileNo || updates.phone || '').trim();
+      const ph = normalizeDevanagariDigits(rawPh).replace(/\D/g, '').slice(-10);
+      safeUpdates.mobileNo = ph;
+    }
+    if (Object.hasOwn(updates || {}, 'notes')) {
+      safeUpdates.notes = String(updates.notes || '').trim();
+    }
+
+    if (Object.keys(safeUpdates).length === 0) {
+      return res.status(400).json({ message: 'कोई वैध अपडेट फ़ील्ड नहीं दी गई।' });
+    }
+
+    const query = addVoterAccess(req);
+    if (Array.isArray(ids) && ids.length > 0) {
+      query._id = { $in: ids };
+    } else if (houseNo) {
+      const cleanH = String(houseNo).replace(/^#/, '').trim();
+      query.houseNo = { $in: [houseNo, cleanH, `#${cleanH}`] };
+      if (wardNo) applyWardFilter(query, wardNo);
+    }
+
+    const result = await Voter.updateMany(query, { $set: safeUpdates });
+
+    // Invalidate Cache for this organization
+    const orgKey = query.organizationId || req.user.organizationId || 'org_default';
+    cache.delPrefix(`voters_all_${orgKey}_`);
+    cache.delPrefix(`wards_summary_${orgKey}_`);
+    cache.delPrefix(`turnout_summary_${orgKey}_`);
+    cache.delPrefix(`households_${orgKey}_`);
+    cache.delPrefix(`caste_`);
+    cache.delPrefix(`community_`);
+
+    res.json({
+      success: true,
+      message: `${result.modifiedCount} मतदाता सफलतापूर्वक अपडेट किए गए।`,
+      modifiedCount: result.modifiedCount
+    });
+  } catch (err) {
+    console.error('Bulk voter update failed:', err.message);
+    res.status(500).json({ message: 'मतदाता अपडेट करने में त्रुटि आई।' });
+  }
+};
+router.post('/bulk-update', verifyToken, requireModule('voters', 'community'), bulkUpdateHandler);
+router.put('/bulk-update', verifyToken, requireModule('voters', 'community'), bulkUpdateHandler);
+
+// Set Family Phone (assigns same mobile number to entire household)
+router.post('/family-phone', verifyToken, requireModule('voters', 'community'), async (req, res) => {
+  try {
+    const { houseNo, wardNo, phone } = req.body;
+    if (!houseNo) {
+      return res.status(400).json({ message: 'मकान संख्या आवश्यक है।' });
+    }
+    const cleanPhone = normalizeDevanagariDigits(String(phone || '')).trim().replace(/\D/g, '').slice(-10);
+    const query = addVoterAccess(req);
+    const cleanH = String(houseNo).replace(/^#/, '').trim();
+    query.houseNo = { $in: [houseNo, cleanH, `#${cleanH}`] };
+    if (wardNo) applyWardFilter(query, wardNo);
+
+    const result = await Voter.updateMany(query, { $set: { mobileNo: cleanPhone } });
+
+    const orgKey = query.organizationId || req.user.organizationId || 'org_default';
+    cache.delPrefix(`voters_all_${orgKey}_`);
+    cache.delPrefix(`households_${orgKey}_`);
+
+    res.json({
+      success: true,
+      message: `परिवार के सभी ${result.modifiedCount} सदस्यों के लिए मोबाइल नंबर सुरक्षित किया गया।`,
+      modifiedCount: result.modifiedCount,
+      phone: cleanPhone
+    });
+  } catch (err) {
+    console.error('Family phone update failed:', err.message);
+    res.status(500).json({ message: 'परिवार मोबाइल नंबर सहेजने में त्रुटि आई।' });
+  }
+});
+
+// Set Family Caste (assigns caste tag to entire household)
+router.post('/family-caste', verifyToken, requireModule('voters', 'community'), async (req, res) => {
+  try {
+    const { houseNo, wardNo, caste } = req.body;
+    if (!houseNo) {
+      return res.status(400).json({ message: 'मकान संख्या आवश्यक है।' });
+    }
+    const cleanCaste = String(caste || '').trim();
+    if (!cleanCaste) {
+      return res.status(400).json({ message: 'जाति का नाम आवश्यक है।' });
+    }
+    const query = addVoterAccess(req);
+    const cleanH = String(houseNo).replace(/^#/, '').trim();
+    query.houseNo = { $in: [houseNo, cleanH, `#${cleanH}`] };
+    if (wardNo) applyWardFilter(query, wardNo);
+
+    const result = await Voter.updateMany(query, { $set: { caste: cleanCaste } });
+
+    const orgKey = query.organizationId || req.user.organizationId || 'org_default';
+    cache.delPrefix(`voters_all_${orgKey}_`);
+    cache.delPrefix(`households_${orgKey}_`);
+    cache.delPrefix(`caste_${orgKey}_`);
+    cache.delPrefix(`community_${orgKey}_`);
+
+    res.json({
+      success: true,
+      message: `परिवार के सभी ${result.modifiedCount} सदस्यों के लिए जाति '${cleanCaste}' सफलतापूर्वक अपडेट की गई।`,
+      modifiedCount: result.modifiedCount,
+      caste: cleanCaste
+    });
+  } catch (err) {
+    console.error('Family caste update failed:', err.message);
+    res.status(500).json({ message: 'परिवार की जाति अपडेट करने में त्रुटि आई।' });
+  }
+});
+
 // BULK DELETE voters (Admin Only)
 router.post('/bulk-delete', verifyToken, async (req, res) => {
   try {
@@ -846,6 +1165,16 @@ router.post('/bulk-delete', verifyToken, async (req, res) => {
     const query = addVoterAccess(req);
     query._id = { $in: ids };
 
+    // Clean Cloudinary images for deleted voters
+    try {
+      const { deleteVoterPhotos } = require('../lib/cloudinaryService');
+      const votersWithPhotos = await Voter.find(query, { photoUrl: 1 }).lean();
+      const urls = votersWithPhotos.map(v => v.photoUrl).filter(Boolean);
+      if (urls.length > 0) deleteVoterPhotos(urls).catch(e => console.warn('[voters] Cloudinary bulk delete error:', e.message));
+    } catch (cErr) {
+      console.warn('[voters] Cloudinary bulk delete error:', cErr.message);
+    }
+
     const result = await Voter.deleteMany(query);
 
     // Invalidate Cache for this organization
@@ -860,114 +1189,6 @@ router.post('/bulk-delete', verifyToken, async (req, res) => {
     res.status(500).json({ message: 'डेटा डिलीट करने में त्रुटि आई।' });
   }
 });
-
-// Get dynamic Castes list from database (Admin configured customCastes + existing voter castes)
-router.get('/castes', verifyToken, async (req, res) => {
-  try {
-    const query = addVoterAccess(req);
-    const orgId = query.organizationId || req.user.organizationId || 'org_default';
-    const cacheKey = `org_castes_${orgId}`;
-    const cached = cache.get(cacheKey);
-    if (cached) return res.json(cached);
-
-    const org = await Organization.findById(orgId).lean();
-    const customCastes = Array.isArray(org?.customCastes) && org.customCastes.length > 0
-      ? org.customCastes
-      : Array.isArray(org?.settings?.customCastes) && org.settings.customCastes.length > 0
-      ? org.settings.customCastes
-      : [];
-
-    const dbCastes = await Voter.distinct('caste', { organizationId: orgId });
-    const cleanedDbCastes = (Array.isArray(dbCastes) ? dbCastes : [])
-      .map((c) => (typeof c === 'string' ? c.trim() : ''))
-      .filter(Boolean);
-
-    // Combine while preserving customCastes first, followed by others
-    const casteSet = new Set([...customCastes, ...cleanedDbCastes]);
-    const castes = Array.from(casteSet);
-
-    const result = { success: true, castes, customCastes };
-    cache.set(cacheKey, result, 180);
-    res.json(result);
-  } catch (err) {
-    console.error('Failed to get castes:', err.message);
-    res.status(500).json({ message: 'Castes could not be loaded.' });
-  }
-});
-
-// Bulk Tag & Bulk Caste Update for multiple selected voters
-const handleBulkUpdate = async (req, res) => {
-  try {
-    const { ids, updates } = req.body;
-    if (!Array.isArray(ids) || ids.length === 0) {
-      return res.status(400).json({ message: 'कम से कम एक मतदाता चुनना आवश्यक है।' });
-    }
-    const cleanIds = ids.slice(0, 5000).filter((id) => (typeof id === 'string' && id.trim()) || typeof id === 'number');
-    if (cleanIds.length === 0) {
-      return res.status(400).json({ message: 'कम से कम एक मान्य मतदाता ID प्रदान करें।' });
-    }
-    if (!updates || typeof updates !== 'object') {
-      return res.status(400).json({ message: 'अद्यतन विवरण (updates) अनिवार्य है।' });
-    }
-
-    const safeSet = {};
-    const allowedFields = [
-      'caste',
-      'surety',
-      'supportStatus',
-      'assignedWorker',
-      'notes',
-      'isMigrant',
-      'migrantLocation'
-    ];
-
-    for (const field of allowedFields) {
-      if (Object.hasOwn(updates, field)) {
-        const val = updates[field];
-        if (field === 'isMigrant') {
-          safeSet.isMigrant = Boolean(val);
-        } else if (field === 'supportStatus') {
-          if (['core', 'swing', 'opposition', 'unmarked', ''].includes(val)) {
-            safeSet.supportStatus = val || 'unmarked';
-          }
-        } else if (typeof val === 'string') {
-          safeSet[field] = val.trim();
-        }
-      }
-    }
-
-    if (Object.keys(safeSet).length === 0) {
-      return res.status(400).json({ message: 'कोई मान्य फ़ील्ड प्रदान नहीं की गई।' });
-    }
-
-    const query = addVoterAccess(req);
-    query._id = { $in: cleanIds };
-
-    const result = await Voter.updateMany(query, { $set: safeSet });
-
-    // Invalidate Cache for this organization
-    const orgKey = query.organizationId || req.user.organizationId || 'org_default';
-    cache.delPrefix(`voters_all_${orgKey}_`);
-    cache.delPrefix(`voter_search_${orgKey}_`);
-    cache.delPrefix(`households_${orgKey}_`);
-    cache.delPrefix(`wards_summary_${orgKey}_`);
-    cache.delPrefix(`turnout_summary_${orgKey}_`);
-    cache.delPrefix(`org_castes_${orgKey}`);
-    cache.delPrefix(`war_room_${orgKey}_`);
-
-    res.json({
-      success: true,
-      message: `${result.modifiedCount} मतदाताओं का विवरण सफलतापूर्वक अपडेट किया गया।`,
-      modifiedCount: result.modifiedCount
-    });
-  } catch (err) {
-    console.error('Bulk voter update failed:', err.message);
-    res.status(500).json({ message: 'बल्क अपडेट करने में त्रुटि आई।' });
-  }
-};
-
-router.post('/bulk-update', verifyToken, requireModule('voters', 'community'), handleBulkUpdate);
-router.put('/bulk-update', verifyToken, requireModule('voters', 'community'), handleBulkUpdate);
 
 // EXPLICIT CLIENT PROTECTION: Catch-all for clients trying to delete or post
 router.use((req, res, next) => {

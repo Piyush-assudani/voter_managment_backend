@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VijaySetu Universal Pure Hindi Electoral Roll Extractor (PERFECT ENGINE)
+MatdataPortal Universal Pure Hindi Electoral Roll Extractor (PERFECT ENGINE)
 Direct PDF Content Stream & Binary TTF Glyph Parser with Government Electoral Lexicon.
 Features:
 - Complete Glyph-Hash dictionary across all Indian / Rajasthan SEC voter PDF fonts
@@ -19,159 +19,298 @@ import glob
 import json
 import struct
 import hashlib
-import difflib
-from collections import defaultdict
 import pypdf
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'python_engine'))
+try:
+    from sandhi_viched import sandhi_viched
+except Exception:
+    def sandhi_viched(text):
+        return text
+
 # ==============================================================================
 # 1. MASTER GLYPH-HASH DICTIONARY (Universal SEC Rajasthan Voter PDFs)
 # ==============================================================================
 GLYPH_HASH_TO_HINDI = {
-    # Vowels (स्वर)
-    'ce804ce7c6': 'अ', '45c4b91091': 'अ', '119c73e737': 'अ', '35ced6b628': 'अ', 'a89dd76efd': 'अ',
-    'a61442952b': 'अ', 'bd69840d9e': 'अ', 'bb08ab4b35': 'अ',
-    '2efd2c4701': 'आ',
-    '5b1d3367b9': 'इ',
-    '4f3a2f5d5c': 'ई', 'e14bcf495a': 'ई', '3b00b1dda7': 'ई', '5788fb4ce4': 'ई', '39e2dee31f': 'ई',
-    'c76170c082': 'ई', 'd1bd160dd1': 'ई', '9923d29632': 'ई',
-    '5cea448068': 'उ',
-    '046b405861': 'ऊ', '93723488c9': 'ऊ', '55fa26fd10': 'ऊ', 'e82b6adb94': 'ऊ', '726b6ec72c': 'ऊ',
-    '4137d91632': 'ए', '5c95b4cd3e': 'ए', '81f45a91fd': 'ए',
-    'b6160428e9': 'ऐ', '7c559bebf6': 'ऐ',
-    '4dff97ade2': 'ओ', 'e53613119b': 'ओ',
-    '2c80487e3f': 'औ',
-    '805bc11136': 'ऋ',
-
-    # Matras & Modifiers (मात्राएं)
-    'ddb59861ec': 'ा', '78feea417a': 'ा',
-    '940f102545': 'ि', 'cad285f226': 'ि', 'f90e17bc6a': 'ि', 'ee740424e8': 'ि',
-    '52e1ecd704': 'िं',
-    '0bfe8aba54': 'ी', 'fd2c68b827': 'ी', '561778e61e': 'ी', '0c38a1de68': 'ी',
-    'eb4776a788': 'ु', '9270cf40b5': 'ु', '634b191808': 'ु',
-    '139503929c': 'ू', '3ba30e63ba': 'पू', '7600b543f9': 'पू', '6a4f928c94': 'पू',
-    '5673f83eb2': 'ृ',
-    'ff774a509c': 'े', 'dc6ebfed73': 'े', 'a394fa367f': 'े',
-    'e0d2a0aa9a': 'ै',
-    '4b894f09df': 'ो', '9777c7fcc8': 'ो',
-    '3ed9121507': 'ौ',
-    '48c0ec2ca4': 'ों', '96ce23ca34': 'ों',
-    '047d8b1a18': 'ं', '02680e665a': 'ं', 'd3a4a84020': 'ं', 'bf77dee873': 'ं', '1164f99f87': 'ं', 'd75610cf75': 'ं',
-    '9a18581fbc': 'र्', '906d14ca84': 'र्', 'def56c5e38': 'र्', 'a7e73062a8': 'र्', '3e6d4c4f43': 'र्',
+    '0171bec762': 'ड',
+    '027103c065': 'ड़',
+    '046b405861': 'ऊ',
+    '047d8b1a18': 'ं',
+    '05308cc89b': 'ड़',
+    '07941b38f2': 'ज्',
     '0a5158353b': '्',
-    '81e8fe8892': '॰', '1ab8336925': '॰',
-
-    # Consonants & Conjuncts (व्यंजन व संयुक्त अक्षर)
-    'ee91b64b3c': 'क', '74d744e8b3': 'क्ष', 'b0659ef005': 'क्र', '976ca4a5be': 'क्ष्', 'bdbd89856b': 'क',
-    '63eefd4c14': 'क', 'bd6c1eae30': 'क', '40dd73efe7': 'क',
-    '8f83dd2ba5': 'ख्', '8b642bd434': 'ख', '11d46de407': 'ख', '6569af7a4c': 'ख', '9364604c2b': 'ख', '6dcfad013f': 'ख', '521d45dc3d': 'ख',
-    'd03da9c3bc': 'ग', 'd2ca7f547d': 'ग्र',
+    '0ba1327fc4': 'ड़',
+    '0bfe8aba54': 'ी',
+    '0c388fbb92': 'ग्',
+    '0c38a1de68': 'ी',
+    '0c4b471492': 'झ',
+    '0c756f93f5': 'प्त',
     '0cda6a9133': 'घ',
-    'd6141a350d': 'च',
+    '0e190bfd1c': 'ज्ञ',
+    '1164f99f87': 'ण्',
+    '11cfd439b5': 'ल्',
+    '11d46de407': 'ीं',
+    '12fb9d0f09': 'हु',
+    '139503929c': 'ू',
+    '1480d40370': 'ष्ठ',
+    '14a018752f': 'प्',
+    '16396a0352': 'स्त्र',
+    '1861fa3ec0': 'न्न',
+    '190b11d6ea': 'झ',
+    '194c71316e': 'ढ',
+    '19774bcbf7': 'ल्',
+    '1ba2a675b1': 'ल्',
+    '1d0368ca3b': 'ल्',
+    '1d729d00ce': 'भ',
+    '1e10d3a1d3': 'ड़',
+    '1f2f22cd9c': 'ब्',
+    '21655d6d20': 'थ्',
+    '2252e0fd34': 'ज्ज',
+    '22c91adf3c': 'ज्ञ',
+    '23f46f5991': 'श्र',
+    '2480d88cb1': 'द्र',
+    '258d7eff1b': 'ीं',
+    '259c4ab587': 'प्',
+    '25e9022dfc': 'ेर्',
+    '2600840ca6': 'द्र',
+    '26654ce284': 'प्',
+    '2ab96237ef': 'म',
+    '2b15a97444': 'ि',
+    '2baee2673d': 'ष्',
+    '2c9c034cf8': 'ैं',
+    '2d961fc68a': 'ट',
+    '2efd2c4701': 'आ',
+    '3147fcb544': 'थ्',
+    '31d7d7ca5a': '◌',
+    '326b85b3ae': 'ि',
+    '37cbf77554': 'ट्ट',
+    '384789ba2d': 'ेर्ं',
+    '39e2dee31f': 'ई',
+    '3a11828b40': 'ल्',
+    '3a9f4a0e0a': 'ि',
+    '3b2dc7fb19': 'ड़',
+    '3ba30e63ba': 'ऊ',
+    '3cb89da98e': 'ल्',
+    '3e6d4c4f43': 'ि',
+    '3ecd36bc08': 'ीं',
+    '3ed9121507': 'ौ',
+    '3fc2dc4f83': 'ओ',
+    '40dd73efe7': 'ैं',
+    '4137d91632': 'ए',
+    '42d41c8023': 'ल्',
+    '46454da477': 'ढ',
+    '4732f6e4cd': 'व',
+    '47a66ae6f0': 'ड़',
+    '47cc38d7c7': 'ड्ड',
+    '47d70eff7c': 'ड़',
+    '48c0ec2ca4': 'ों',
+    '4b894f09df': 'ो',
+    '4c94216b25': 'फ',
+    '4d1d034fca': 'द्य',
+    '4d4d1bf640': 'ेर्ं',
+    '4dff97ade2': 'ओं',
+    '4e05551e38': 'ल्',
+    '4e7e55c17c': 'ल्',
+    '4f3a2f5d5c': 'ई',
+    '4f5142b1bc': 'ीं',
+    '504921c133': 'त्र',
+    '5074b61402': 'द्घ',
+    '51061acd4a': 'ड़',
+    '513d4f697f': 'ीर्',
+    '521d45dc3d': 'ीं',
+    '52e1ecd704': 'िं',
+    '561778e61e': 'ी',
+    '5673f83eb2': 'ृ',
+    '5788fb4ce4': 'ई',
+    '5819a1061b': 'ॅ',
+    '599c678acf': 'झ',
+    '5b1d3367b9': 'इ',
+    '5c95b4cd3e': 'ए',
+    '5cea448068': 'उ',
+    '5d1ddd1813': 'स',
+    '5f1d629e11': 'द्र',
+    '5f38615013': 'श्व',
+    '60ee998735': 'रू',
+    '613075704b': 'प्',
+    '61ece8dbe0': 'ि',
+    '63eefd4c14': 'ैं',
+    '65695721a3': 'प',
+    '66e5287b94': 'त्',
+    '66ff22024f': 'फ',
+    '6751e9ce99': 'न्',
+    '68e969101b': 'श्',
+    '6a4f928c94': 'ऊ',
+    '6af89d7c27': 'ष',
+    '6b0a2443cf': 'झ',
+    '6dcfad013f': 'ीं',
+    '6fee751c4f': 'ोर्',
+    '70ffa394e7': 'ीं',
+    '721e46753b': 'ड़',
+    '726b6ec72c': 'ऊ',
+    '73586743ed': 'रु',
+    '738886d79d': 'ेर्',
+    '73ecbe4a6c': 'ीं',
     '747ebbd4ad': 'छ',
-    '07941b38f2': 'ज्', 'e895e1e174': 'ज', '758397e072': 'ज़', '86a1b3345a': 'ज्ज', '22c91adf3c': 'ज', '0e190bfd1c': 'ज',
-    'd60218c6fa': 'झ', '190b11d6ea': 'झ', '0c4b471492': 'झ', '04ebdad9fa': 'झ', 'ae7ed0be9e': 'झ', '6b0a2443cf': 'झ', '89240a9925': 'झ',
-    '2d961fc68a': 'ट', '9e75d77c52': 'ट्', '37cbf77554': 'ट',
+    '74d744e8b3': 'क्ष',
+    '74db27ca64': 'फ',
+    '750c1b0d41': 'प्',
+    '758397e072': 'ज़',
+    '7600b543f9': 'फ',
+    '76cbcdf490': 'झ',
+    '772188adff': 'च्',
+    '78ebd5f238': 'ड्ड',
+    '78feea417a': '◌',
+    '79e6225dee': 'ध',
+    '7ab9ef3167': 'ऊ',
+    '7c559bebf6': 'ऐ',
+    '7cb6208062': 'न',
+    '7d81b055b4': 'फ',
+    '7f66e38315': 'ीर्',
+    '805bc11136': 'ऋ',
+    '807e80bed1': 'ीं',
+    '81e8fe8892': '॰',
+    '81f45a91fd': 'ए',
+    '83692da855': 'हु',
+    '86a1b3345a': 'ज्ज',
+    '87a20b56c9': 'प्',
+    '890802b019': 'ड्ड',
+    '890b44a110': 'म्',
+    '89240a9925': 'झ',
+    '8b642bd434': 'ख',
+    '8ba1e1db3f': 'ड्ड',
+    '8c44df052d': 'स्',
+    '8ca833b6f2': 'ण',
+    '8e1c2ad8ae': 'र',
+    '8f83dd2ba5': 'ख्',
+    '8f924cc8ba': 'फ',
+    '8f994df474': 'ढ',
+    '8fce6b30ee': 'ीं',
+    '906d14ca84': 'ेर्',
+    '9076ec49ea': 'त',
+    '91c4fb9cde': 'द्र',
+    '9270cf40b5': '◌',
+    '9364604c2b': 'ों',
+    '93723488c9': 'ऊ',
+    '93d2baa93d': 'ल्',
+    '940f102545': 'ि',
+    '976ca4a5be': 'क्ष्',
+    '9923d29632': 'ई',
+    '9a18581fbc': 'र्',
+    '9b5ae33b17': 'ध्',
+    '9b795c29ee': 'द',
+    '9bbba179cc': 'ौं',
+    '9dbe3751a3': 'ि',
+    '9e75d77c52': 'ट्य',
+    '9f91e4de31': 'ल',
     'a015e63dde': 'ठ',
-    '890802b019': 'ड्ड', 'ec9ce8b169': 'ड़', '721e46753b': 'ड़', '0171bec762': 'ड',
-    '0ba1327fc4': 'ड्', '1e10d3a1d3': 'ड्', '47a66ae6f0': 'ड्', '027103c065': 'ड्', 'a6d1de452f': 'ड्', '87ecd127d1': 'ड्',
-    '313d4f057a': 'ड', 'f3a1c96457': 'ड', '05308cc89b': 'ड', '7fc0e56d87': 'ड', '3b2dc7fb19': 'ड', 'f97a78be37': 'ड', '47d70eff7c': 'ड', 'af77da75e5': 'ड', '1a9bf75e17': 'ड', '78ebd5f238': 'ड', '7e98014dff': 'ड', '47cf62e4aa': 'ड',
-    'fb772abf30': 'ड़', 'd9784dc043': 'ड़',
-    '8f994df474': 'ढ', 'fad0ed760c': 'ढ', '46454da477': 'ढ', 'b8eb273898': 'ढ', 'a5bf22212a': 'ढ', 'b4c6be945c': 'ढ', 'ddea34e5cc': 'ढ', 'c6202b4bc3': 'ढ',
-    '8ca833b6f2': 'ण', 'b677287bbf': 'ण',
-    '9076ec49ea': 'त', '504921c133': 'त्र', '66e5287b94': 'त्', '230f051b3f': 'त', 'c005752634': 'त',
-    '3147fcb544': 'थ्', 'a8bcabc3c7': 'थ',
-    '9b795c29ee': 'द', 'aa29d6fd6a': 'द', 'c248b92527': 'द',
-    '79e6225dee': 'ध', 'a029efb9f7': 'ध', '9b5ae33b17': 'ध्य',
-    '7cb6208062': 'न', '6751e9ce99': 'न्', '5f1d629e11': 'द्र', '1861fa3ec0': 'न्न', 'c4da05d397': 'न्द्र',
-    '91c4fb9cde': 'द्र', 'd652713d5b': 'द्र', '2480d88cb1': 'द्र', '2600840ca6': 'द्र', '6b25cffc75': 'द्र',
-    '65695721a3': 'प', 'f278d9cdb5': 'प', 'ec864e5618': 'प्र', '26654ce284': 'प्',
-    'a9f61e1199': 'प्', 'c68d1cf440': 'प्', 'a3422e66d6': 'प्', '750c1b0d41': 'प्', '25e823bbd8': 'प्', '613075704b': 'प्', '259c4ab587': 'प्',
-    '0c756f93f5': 'प', '14a018752f': 'प', '87a20b56c9': 'प', 'a9b34f178a': 'प',
-    'c4bad94212': 'प्रे', '3fc2dc4f83': 'प्रे',
-    '4c94216b25': 'फ', '74db27ca64': 'फ', '66ff22024f': 'फ', 'ad465bf0bc': 'फ', 'c88c48c79e': 'फ', 'a9488cba84': 'फ', '1428919c17': 'फ', 'fe0dc18178': 'फ',
-    'b195fad4ed': 'ब', 'b6d9b989ad': 'बृ', '8fce6b30ee': 'ब',
-    '1d729d00ce': 'भ', '7ab9ef3167': 'भा', '3ecd36bc08': 'भ',
-    '2ab96237ef': 'म', '890b44a110': 'म्', 'eaeead89e4': 'म्', 'dd069c3351': 'म्म', '1024bbd493': 'म्म',
+    'a029efb9f7': 'ध्र',
+    'a178079bc2': 'व्य',
+    'a3422e66d6': 'प्',
+    'a394fa367f': '◌',
+    'a4274d8f98': 'हु',
+    'a5bf22212a': 'ढ',
+    'a6d1de452f': 'ड़',
+    'a6dd172025': 'ल़',
+    'a7e73062a8': 'ेर्',
+    'a8739110de': 'ों',
+    'a8b78a0c82': '◌',
+    'a8bcabc3c7': 'थ',
+    'a9488cba84': 'फ',
+    'a9b34f178a': 'प्',
+    'a9f61e1199': 'प्',
+    'aa29d6fd6a': 'द',
+    'aacdfd3864': 'द्ध',
+    'ac1d0b4152': 'क्',
+    'acae4e4844': 'ह',
+    'ad6125f089': 'ीं',
+    'ad9ebd3f61': 'श्न',
+    'ae7ed0be9e': 'झ',
+    'af77da75e5': 'ड्ड',
+    'b0659ef005': 'क्र',
+    'b195fad4ed': 'ब',
+    'b25df06259': 'ल्',
+    'b4c6be945c': 'ढ',
+    'b516ed4428': 'ेर्ं',
+    'b6160428e9': 'ऐ',
+    'b627b4ad55': 'ीर्',
+    'b654a1fab9': 'थ्र',
+    'b677287bbf': 'ण्',
+    'b6d9b989ad': 'ब्र',
+    'bb420533eb': 'द्ध',
+    'bc42741d95': 'ल्',
+    'bdbd89856b': 'क़',
+    'bead7b885e': 'स्न',
+    'bebbc6ce45': 'च्च',
+    'bf77dee873': 'ँ',
+    'c005752634': 'त्न',
     'c42eb6b0f3': 'य',
-    '8e1c2ad8ae': 'र', '60ee998735': 'रु', '73586743ed': 'रु',
-    'd9036427cf': 'र', '3a9f4a0e0a': 'र', '9dbe3751a3': 'र', '326b85b3ae': 'र', '25e9022dfc': 'र', '6fee751c4f': 'र', '738886d79d': 'र', '61ece8dbe0': 'र', '384789ba2d': 'र', '7f66e38315': 'र', 'b516ed4428': 'र', '4d4d1bf640': 'र', '2b15a97444': 'र', 'f762cc5fd1': 'र',
-    '9f91e4de31': 'ल', '3cb89da98e': 'ल्य', '4e05551e38': 'ल्', 'bc42741d95': 'ल्', '42d41c8023': 'ल्', '11cfd439b5': 'ल्', '93d2baa93d': 'ल', 'b25df06259': 'ल', '19774bcbf7': 'ल', 'dd11ba4798': 'ल्',
-    '9bbba179cc': 'ल', '9ecc1fb7b9': 'ल', '3a11828b40': 'ल', 'a6dd172025': 'ल', 'f4616f7a0d': 'ल', '1ba2a675b1': 'ल',
-    '4732f6e4cd': 'व', 'a178079bc2': 'व्य', '258d7eff1b': 'व',
-    'd3151878f0': 'श', '68e969101b': 'श्व', '5f38615013': 'श्व', '23f46f5991': 'श्र',
-    '6af89d7c27': 'ष', 'f8eaaf6e12': 'ष्ठ', '764d763216': 'ष्ठ', '2baee2673d': 'ष्',
-    '56654280a6': 'ष', '1480d40370': 'ष', 'e058c1c9d7': 'ष', '334d4c7c01': 'ष', 'a6b2b19659': 'ष', 'e3d24bba6b': 'ष',
-    '5d1ddd1813': 'स', '8c44df052d': 'स्', 'dc32c6ed02': 'स्', '16396a0352': 'स्त्र', 'dc507a85ae': 'स्', '68454725c9': 'स्',
-    '73ecbe4a6c': 'स', 'bead7b885e': 'स', 'ad6125f089': 'स',
-    'acae4e4844': 'ह', 'f1bad2c450': 'ह', 'a4274d8f98': 'हु', 'adb8160514': 'हुक', '83692da855': 'हुक', '12fb9d0f09': 'हु',
-    'f2e90f726c': 'थ्व', '4d1d034fca': 'द्ध', 'aacdfd3864': 'द्ध', 'd05bddea29': 'द्ध',
-
-    # Universal Cross-District Learned Glyphs (01.pdf, Maulasar, Ramasani Bala)
-    '9ed0305c30': 'ए', '79cddf1cb9': 'ओ', 'cb9f96efec': 'अ', 'c21b1d6645': 'अ', '2807fb8b26': 'ऋ',
-    'f3006b2bd4': 'ु', '9608da6ec3': 'ु', 'bd72e8264e': 'ी', 'a887f64657': 'ी',
-    '66e5ec4b59': 'े', '1a936145d7': 'े', '9905d0b67d': 'ें',
-    '5878c30f0f': 'ं', '880e3635c0': 'मं', 'e393fd53d5': 'मं',
-    'c87fa4db51': '॰', '1a15cc97e6': '॰', '618091d0dd': '॰',
-    '5db4f82d8b': 'ग', '3310bc81b7': 'ग', '751f7b6026': 'ग', '0c388fbb92': 'ग',
-    '4d08822826': 'ख',
-    '766fe62e17': 'ज्ञ',
-    '7a8b483f91': 'ज्ज', '7aae07cf6a': 'ज्ज',
-    '0a5f709151': 'ठ',
-    '24ca7284a8': 'ड़', 'aacf38e6ce': 'ड़', 'ad6801aa35': 'ड़', 'fd2282cbb7': 'ड़', 'b93ab2f0b6': 'ड़', '9d16edd8cd': 'ड़',
-    '99ca17969d': 'ष्ठ', '473e6ecf96': 'ष्ठ',
-    'e5f1089bca': 'ण',
-    'b2e4278acd': 'त', '561ef8b7ef': 'त्र',
-    'aefa09333b': 'ध',
-    'fa7d21cbd0': 'द्म', 'a3ca9fb4d5': 'द्वा', 'b6fc0aacd4': 'द्य', '674cf0dbd2': 'द्व',
-    '495ad4ec8e': 'प्', '7473598df5': 'प्', '269ee0b78c': 'प्',
-    'b96edff874': 'प्र', 'b39bd255e2': 'प्र', '70dcf1cf7a': 'प्रे',
-    '67dd4b48cc': 'ब', '7d81b055b4': 'ब',
-    '2fbf81e97d': 'म्प', 'a3fe1024db': 'म्', '2a332feaeb': 'म्बि',
-    '5f84c76bc9': 'ड्डी',
-    '6b41226650': 'र', '751ed94097': 'र', '326ffdd62a': 'र',
-    '7eff7b2ba9': 'र्', 'e55899c163': 'र्',
-    '3a9d583bb3': 'ल्', '2e17cc8d2c': 'ल्',
-    '0e0d111f5f': 'व', 'caad6dc898': 'व', '358a9cf564': 'व',
-    '1416a867ad': 'द',
-
-    # Additional Universal Glyph Hashes
-    'e936687da2': 'उ', 'a8b78a0c82': 'म्', '5074b61402': 'द्धा', '194c71316e': 'भा',
-    '10bdad6422': 'ों', '78a401ac9f': 'य', 'be35a81a12': 'ष्ठ', '513d4f697f': 'र्',
-    '31d7d7ca5a': 'म', 'ad9ebd3f61': 'द्य', 'e014c65273': 'त्', '47cc38d7c7': 'ड्डी',
-    'ac1d0b4152': 'मा', '2c9c034cf8': 'कु', 'b654a1fab9': 'र्था', 'f80362e7d7': 'खे',
-    '4e7e55c17c': 'प्पू', 'bb420533eb': 'द्धा', '4f5142b1bc': 'ी', 'c62677ef77': 'मे',
-    '21655d6d20': 'थ्वी', '76cbcdf490': 'झ', '8efe6a46a7': 'क्रमा', '8f924cc8ba': 'पू',
-    '807e80bed1': 'थू', '1f2f22cd9c': 'ब्', 'f5e95ba074': 'र्', 'dee07a7b88': 'प्',
-    '1d0368ca3b': 'न्नी', 'efefeeb9c9': 'ों', 'daa8a4ef98': 'क्रमा', 'a8739110de': 'सिंह',
-    '51061acd4a': 'त्री', '70ffa394e7': 'ब', '599c678acf': 'स्व', 'd64d1492a7': 'णे',
-    '2252e0fd34': 'ंगा', 'da7cc732a5': 'ध', '6da47de8a5': 'ह्', 'b7fa15a1db': 'म्प',
-    '4fe5abd638': 'फ', 'b9b2e35f43': 'रा', '04d32fed8d': 'ठ', 'b7a049a8b4': 'र्',
-    'c4166758d5': 'ध्रु', 'c848285f51': 'ल', '539252633f': 'ु', '3f5e22c3d7': 'ख',
-    '4ab52e0982': 'दी', 'da5a2df435': '॰', '1f99651d39': 'दा', 'b47e524af4': '॰',
-    '49f6a30031': 'ै', '5d12329365': 'ों', '3e39d95712': 'क्ष', 'ea264bbac5': 'क',
-    '983a3b3e51': 'न', '8f499f1686': 'ा', '2f6d32e2ab': 'द्वि', 'd5840cd7c5': 'भु',
-
-    # Universal Batch 2 (Completing all 40 Electoral Roll PDFs)
-    '772188adff': 'छ', '8ba1e1db3f': 'ड्डी', 'ccb67ba80e': 'क', 'b9a9b43dee': 'व',
-    'b5abb8b83c': 'ि', '7ac292b944': 'ध', '5aa7546876': 'ग', 'bbe1ebb1c0': 'ंख',
-    '1a0d6e034a': 'ंख', '002d8126d7': '॰', '1f15aabb4d': 'य', 'a0562332a5': 'ि',
-    'f89a8b1813': '॰', 'd77e63e68d': '७', '5710b18d8d': 'षि', 'c85f26e4bd': '१',
-    '01106da655': '२', '78dfa31248': '५', '89bf870bd7': '०', 'a11f424a94': 'त',
-    '933cd8ad1e': 'शा', 'b5ef41f3f3': '०', 'bcad0229a9': '६', 'd36435bef2': 'स',
-    '5a4d2599b7': 'ो', '15197076ee': '॰', 'd9f90e5222': '॰', 'eeb67b0b42': 'र',
-    '70431749e1': '७', 'c8110836dc': '०',
-
-    # Multi-PDF Verified Ligatures & Numerical Glyphs (Universal Coverage)
-    'bebbc6ce45': 'च्च', 'b627b4ad55': 'र्ी', 'c000dbe9e4': 'ों',
-    'c82f75d685': 'ों', '5819a1061b': 'ॅ', '3527876949': '३'
+    'c4bad94212': 'ओ',
+    'c62677ef77': 'ऊ',
+    'c68d1cf440': 'प्',
+    'c76170c082': 'ई',
+    'c88c48c79e': 'फ',
+    'cad285f226': 'ि',
+    'ccb67ba80e': 'ैं',
+    'ce804ce7c6': 'अ',
+    'd03da9c3bc': 'ग',
+    'd05bddea29': 'द्व',
+    'd1bd160dd1': 'ई',
+    'd2ca7f547d': 'ग्र',
+    'd3151878f0': 'श',
+    'd3a4a84020': 'ें',
+    'd60218c6fa': 'झ',
+    'd6141a350d': 'च',
+    'd64d1492a7': 'ेर्',
+    'd652713d5b': 'द्र',
+    'd75610cf75': 'ैं',
+    'd9036427cf': 'ि',
+    'd9784dc043': 'ड़',
+    'dc507a85ae': 'स्',
+    'dc6ebfed73': 'े',
+    'dd11ba4798': 'ल्',
+    'ddb59861ec': 'ा',
+    'dee07a7b88': 'प्',
+    'def56c5e38': 'ेर्',
+    'e014c65273': 'त्त',
+    'e058c1c9d7': 'ष्ठ',
+    'e0d2a0aa9a': 'ै',
+    'e53613119b': 'ओ',
+    'e82b6adb94': 'ऊ',
+    'e895e1e174': 'ज',
+    'e936687da2': 'ऊ',
+    'eb4776a788': 'ु',
+    'ec864e5618': 'प्र',
+    'ec9ce8b169': 'ड़',
+    'ee91b64b3c': 'क',
+    'f2e90f726c': 'थ्',
+    'f4616f7a0d': 'ों',
+    'f5e95ba074': 'ि',
+    'f762cc5fd1': 'ि',
+    'f8eaaf6e12': 'ष्ठ',
+    'f90e17bc6a': 'ि',
+    'fad0ed760c': 'ढ',
+    'fb772abf30': 'ड़',
+    'fe0dc18178': 'फ',
+    'ff774a509c': 'े',
+    # Rajasthan SEC Critical Verified Font CMap Fixes
+    'fd2c68b827': 'ी',
+    '539252633f': 'ु',
+    '18bede6132': 'ीं',
+    'b96edff874': 'प्र',
+    'a65bc08781': 'ो',
+    'ee740424e8': 'ि',
+    '0b26a93619': 'िर्',
+    '318f846b5b': 'िर्',
+    '02680e665a': 'ं',
 }
 
-PRE_BASE_HASHES = {'940f102545', 'cad285f226', 'f90e17bc6a', 'ee740424e8', '52e1ecd704', 'b5abb8b83c', 'a0562332a5'}
-REPH_HASHES = {'9a18581fbc', '906d14ca84', 'def56c5e38', 'a7e73062a8', '3e6d4c4f43', '7eff7b2ba9', 'e55899c163', '513d4f697f', 'f5e95ba074', 'b7a049a8b4'}
-MATRA_CHARS = {'ा', 'ि', 'ी', 'ु', 'ू', 'ृ', 'े', 'ै', 'ो', 'ौ', 'ं', 'ों', 'िं', '्', 'ें', 'ॅ'}
+PRE_BASE_HASHES = set(['2b15a97444', '326b85b3ae', '3a9f4a0e0a', '3e6d4c4f43', '52e1ecd704', '61ece8dbe0', '940f102545', '9dbe3751a3', 'cad285f226', 'd9036427cf', 'f5e95ba074', 'f762cc5fd1', 'f90e17bc6a', 'ee740424e8', '0b26a93619', '318f846b5b'])
+REPH_HASHES = set(['25e9022dfc', '384789ba2d', '4d4d1bf640', '513d4f697f', '6fee751c4f', '738886d79d', '7f66e38315', '906d14ca84', '9a18581fbc', 'a7e73062a8', 'b516ed4428', 'b627b4ad55', 'd64d1492a7', 'def56c5e38', '0b26a93619', '318f846b5b'])
+MATRA_CHARS = {'ा', 'ि', 'ी', 'ु', 'ू', 'ृ', 'े', 'ै', 'ो', 'ौ', 'ं', 'ँ', 'ः', 'ॅ', 'ों', 'ौं', 'ैं', 'ीं', 'ें', '्'}
 
 # ==============================================================================
 # CONTINUOUS SELF-LEARNING GLYPH & WORD DICTIONARY SYSTEM
@@ -245,10 +384,12 @@ def parse_to_unicode_map(to_uni_obj):
 
     return u_map
 
-# Dynamically merge learned dictionary on startup
+# Dynamically merge learned dictionary on startup (never overwrite verified master glyphs)
 _learned_g, _learned_w = load_learned_dictionary()
 if _learned_g:
-    GLYPH_HASH_TO_HINDI.update(_learned_g)
+    for k, v in _learned_g.items():
+        if k not in GLYPH_HASH_TO_HINDI:
+            GLYPH_HASH_TO_HINDI[k] = v
 
 # ==============================================================================
 # 2. UNIVERSAL GOVERNMENT ELECTORAL LEXICON (Standardized Hindi Names)
@@ -276,17 +417,116 @@ GOV_LEXICON_RULES = [
     (dev_word('सवरुप'), 'स्वरूप'),
     (dev_word('स्वरुप'), 'स्वरूप'),
     (dev_word('सवरूप'), 'स्वरूप'),
+    (dev_word('रामसवरूप'), 'रामस्वरूप'),
+    (dev_word('राम सवरूप'), 'रामस्वरूप'),
+    (dev_word('सवरुपाराम'), 'स्वरूपाराम'),
+    (dev_word('सवरूपाराम'), 'स्वरूपाराम'),
     
     # 3. Singh / Anusvara fixes
+    (re.compile(r'([^\s])सिह(?=[^\u0900-\u097F]|$)'), r'\1 सिंह'),
     (dev_word('सिह'), 'सिंह'),
     (dev_word('सिहं'), 'सिंह'),
     (dev_word('बसिह'), 'सिंह'),
-    (dev_word('डूंगरसिह'), 'डूंगरसिंह'),
+    (dev_word('डूंगरसिह'), 'डूंगर सिंह'),
     (dev_word('संवासिह'), 'सवाई सिंह'),
     (dev_word('पूनमसिह'), 'पूनम सिंह'),
     (dev_word('खवसिह'), 'खींव सिंह'),
+    (dev_word('सावलसिह'), 'सांवल सिंह'),
+    (dev_word('भंवरसिह'), 'भंवर सिंह'),
+    (dev_word('सावलराम'), 'सांवलराम'),
+    (dev_word('सावलाराम'), 'सांवलाराम'),
+    (re.compile(r'([^\s])कवर(?=[^\u0900-\u097F]|$)'), r'\1 कंवर'),
+    (dev_word('कवर'), 'कंवर'),
     
-    # 4. Standard Rajasthani Electoral Names
+    # 4. Champa fixes (चम्पा)
+    (dev_word('चमपालाल'), 'चम्पालाल'),
+    (dev_word('चमपाराम'), 'चम्पाराम'),
+    (dev_word('चमपादास'), 'चम्पादास'),
+    (dev_word('चमपा देवी'), 'चम्पा देवी'),
+    (dev_word('चमपादेवी'), 'चम्पा देवी'),
+    (dev_word('चमपा'), 'चम्पा'),
+    
+    # 5. Pappu / Sappu fixes (पप्पू)
+    (dev_word('पपपू तेवी'), 'पप्पू देवी'),
+    (dev_word('पपपू देवी'), 'पप्पू देवी'),
+    (dev_word('पपपू'), 'पप्पू'),
+    (dev_word('पपूडी देवी'), 'पप्पूड़ी देवी'),
+    (dev_word('पपूडीदेवी'), 'पप्पूड़ी देवी'),
+    (dev_word('पपूडी'), 'पप्पूड़ी'),
+    (dev_word('पपूराम'), 'पप्पूराम'),
+    (dev_word('पपू'), 'पप्पू'),
+    (dev_word('सपपू'), 'सप्पू'),
+    
+    # 6. Mohammad fixes (मोहम्मद)
+    (dev_word('मोहममद'), 'मोहम्मद'),
+    (dev_word('मौहममद'), 'मोहम्मद'),
+    (dev_word('मोहमद'), 'मोहम्मद'),
+    (dev_word('मलहम्ममद'), 'मोहम्मद'),
+    (dev_word('सफीमोहममद'), 'सफी मोहम्मद'),
+    
+    # 7. Uttamchand fixes (उत्तमचंद)
+    (dev_word('उतमचन्द'), 'उत्तमचंद'),
+    (dev_word('उतमचंद'), 'उत्तमचंद'),
+    (dev_word('उत्मचन्द'), 'उत्तमचंद'),
+    (dev_word('उत्मचंद'), 'उत्तमचंद'),
+    (dev_word('उत्म चंद'), 'उत्तमचंद'),
+    (dev_word('उत्म'), 'उत्तम'),
+    (dev_word('उत्तम चपद'), 'उत्तमचंद'),
+    (dev_word('उतम चपद'), 'उत्तमचंद'),
+    (dev_word('चपद'), 'चंद'),
+
+    # 7b. Hasmukh & Paliwal fixes
+    (dev_word('हसमचरख'), 'हसमुख'),
+    (dev_word('हसमचख'), 'हसमुख'),
+    (dev_word('हसमख'), 'हसमुख'),
+    (dev_word('पाललवालल'), 'पालीवालों'),
+    (dev_word('पाललवाल'), 'पालीवाल'),
+    
+    # 8. Devi / Glued Suffix fixes
+    (re.compile(r'([^\s])तेवी(?=[^\u0900-\u097F]|$)'), r'\1 देवी'),
+    (dev_word('तेवी'), 'देवी'),
+    (re.compile(r'([ाीूु])देवी(?=[^\u0900-\u097F]|$)'), r'\1 देवी'),
+    
+    # 9. Hanuman / Hadman fixes (हड़मान)
+    (dev_word('हड़मानराम'), 'हड़मानराम'),
+    (dev_word('हडमानराम'), 'हड़मानराम'),
+    (dev_word('हड़मानाराम'), 'हड़मानाराम'),
+    (dev_word('हडमानाराम'), 'हड़मानाराम'),
+    (dev_word('हडमान'), 'हड़मान'),
+    (dev_word('हड़मान'), 'हड़मान'),
+    (dev_word('हडमाना'), 'हड़माना'),
+    (dev_word('हडमन'), 'हड़मान'),
+    
+    # 10. OCR Font Ligature Glitches (3 -> ई/ऊ/ओ, ड़, etc.)
+    (dev_word('धूडचद'), 'धूडचंद'),
+    (dev_word('नीमबाराम'), 'नीम्बाराम'),
+    (dev_word('प्रेपनाथ'), 'प्रेमनाथ'),
+    (dev_word('प्रेप नाथ'), 'प्रेमनाथ'),
+    (dev_word('प्रेप'), 'प्रेम'),
+    (dev_word('डिमपल'), 'डिंपल'),
+    (dev_word('डिम्मपल'), 'डिंपल'),
+    (dev_word('कुमपा'), 'कुम्पा'),
+    (dev_word('कुमपाराम'), 'कुम्पाराम'),
+    (dev_word('जलला'), 'जल्ला'),
+    (dev_word('भलला'), 'भल्ला'),
+    (dev_word('भललाराम'), 'भल्लाराम'),
+    (dev_word('धललकी'), 'धल्लकी'),
+    (dev_word('मफतललाल'), 'मफतलाल'),
+    (dev_word('बिसमिललाबानू'), 'बिस्मिल्लाह बानो'),
+    (dev_word('गलतमपुरी'), 'गौतमपुरी'),
+    (dev_word('गलतमचन्द'), 'गौतमचंद'),
+    (dev_word('गलतम'), 'गौतम'),
+    (dev_word('ललीता'), 'ललिता'),
+    (dev_word('ललीत'), 'ललित'),
+    (dev_word('ललीतकुमार'), 'ललितकुमार'),
+    (dev_word('मा३ीदेवी'), 'माई देवी'),
+    (dev_word('मा३ी'), 'माई'),
+    (dev_word('३ुसा राम'), 'ईसा राम'),
+    (dev_word('३ुसा'), 'ईसा'),
+    (dev_word('३रसाराम'), 'ईसराराम'),
+    (dev_word('३ोजा'), 'ईजा'),
+    
+    # 11. Standard Rajasthani Electoral Names
     (dev_word('कयाणसिंह'), 'कल्याण सिंह'),
     (dev_word('कयाण'), 'कल्याण'),
     (dev_word('शवण'), 'श्रवण'),
@@ -322,7 +562,6 @@ GOV_LEXICON_RULES = [
     (dev_word('उमला'), 'उर्मिला'),
     (dev_word('नीलकठ'), 'नीलकंठ'),
     (dev_word('सत्यनाराण'), 'सत्यनारायण'),
-    (dev_word('पपू'), 'पप्पू'),
     (dev_word('पथम'), 'प्रथम'),
     (dev_word('पकाश'), 'प्रकाश'),
     (dev_word('पमोद'), 'प्रमोद'),
@@ -342,25 +581,76 @@ GOV_LEXICON_RULES = [
     (dev_word('श्रीीकिसन'), 'श्रीकिसन'),
     (dev_word('पंठेप सिंह'), 'प्रताप सिंह'),
     (dev_word('पंेेप सिंह'), 'प्रताप सिंह'),
-
-    # 5. High-Frequency Rajasthan Font Glyph Glitches
+    (dev_word('ओम्पप्रकाश'), 'ओमप्रकाश'),
+    (dev_word('ओम्प्रकाश'), 'ओमप्रकाश'),
+    (dev_word('ओमपकाश'), 'ओमप्रकाश'),
+    (dev_word('ओपमप्रकाश'), 'ओमप्रकाश'),
+    (dev_word('प्रेमपकाश'), 'प्रेमप्रकाश'),
+    (dev_word('प्रेममप्रकाश'), 'प्रेमप्रकाश'),
+    (re.compile(r'\bपताप\s*राम\b'), 'प्रतापराम'),
+    (dev_word('पताप'), 'प्रताप'),
+    (re.compile(r'\bआमबु\s*देवी\b'), 'आम्बु देवी'),
+    (dev_word('आमबु'), 'आम्बु'),
+    
+    # 12. Client-Reported SEC CMap Font Normalizations
+    (dev_word('खींम सिंह'), 'खीम सिंह'),
+    (dev_word('खींमसिंह'), 'खीम सिंह'),
+    (dev_word('खींम'), 'खीम'),
+    (dev_word('खसम सिंह'), 'खीम सिंह'),
+    (dev_word('खसमाराम'), 'खीमाराम'),
+    (dev_word('बाबच सिंह'), 'बाबू सिंह'),
+    (dev_word('बाबु सिंह'), 'बाबू सिंह'),
+    (dev_word('बाबच'), 'बाबू'),
+    (dev_word('बाबु'), 'बाबू'),
+    (dev_word('जलतेन्द्र'), 'जितेन्द्र'),
+    (dev_word('अमलषा'), 'अमीषा'),
+    (dev_word('विष्णच दास'), 'विष्णु दास'),
+    (dev_word('विष्णचदास'), 'विष्णुदास'),
+    (dev_word('विष्णच'), 'विष्णु'),
     (dev_word('सररता'), 'सरिता'),
-    (dev_word('दररया'), 'दरिया'),
-    (dev_word('हररशरण'), 'हरिशरण'),
-    (dev_word('हरर'), 'हरि'),
+    (dev_word('पवीण कुमार'), 'प्रवीण कुमार'),
+    (dev_word('पवीण'), 'प्रवीण'),
+    (dev_word('सलहन लाल'), 'सोहन लाल'),
+    (dev_word('सलहनलाल'), 'सोहनलाल'),
+    (dev_word('सलहन'), 'सोहन'),
     (dev_word('उरमला'), 'उर्मिला'),
-    (dev_word('उरममला'), 'उर्मिला'),
-    (dev_word('मालारमा'), 'मालाराम'),
-    (dev_word('मागीलाल'), 'मांगीलाल'),
-    (dev_word('संजप'), 'संजू'),
-    (dev_word('पपखा'), 'पुखा'),
-    (dev_word('पपूराम'), 'पप्पूराम'),
-    (dev_word('पपू राम'), 'पप्पू राम'),
-    (dev_word('पिन्डे ल'), 'पिन्डेल'),
-    (dev_word('पिन्डेल'), 'पिन्डेल'),
-    (dev_word('मुककेश'), 'मुकेश'),
-    (dev_word('ररकू'), 'रिंकू'),
-    (dev_word('ररंकू'), 'रिंकू')
+    (dev_word('नरससग'), 'नरसिंह'),
+    (dev_word('खचशल'), 'खुशी'),
+    (dev_word('सचन्दर'), 'सुन्दर'),
+    (dev_word('शरमला'), 'शर्मिला'),
+    (dev_word('नरमला'), 'निर्मला'),
+    (dev_word('प्रकाशुन्द्र'), 'प्रकाशचन्द्र'),
+    (dev_word('मनलज'), 'मनोज'),
+    (dev_word('मनलज कुमार'), 'मनोज कुमार'),
+    (dev_word('मनलज पालीवाल'), 'मनोज पालीवाल'),
+    (dev_word('बीमनलज कुमार'), 'बी. मनोज कुमार'),
+    (dev_word('बलमनलज कुमार'), 'बी. मनोज कुमार'),
+    (dev_word('बीमनलज'), 'बी. मनोज'),
+    (dev_word('बलमनलज'), 'बी. मनोज'),
+    (dev_word('सरसवतल'), 'सरस्वती'),
+    (dev_word('सरसवती'), 'सरस्वती'),
+    (dev_word('क्रमानिता कुमारी'), 'अनिता कुमारी'),
+    (dev_word('क्रमानिता'), 'अनिता'),
+    (dev_word('क्रमानिल कुमार'), 'अनिल कुमार'),
+    (dev_word('क्रमानिल'), 'अनिल'),
+    (dev_word('क्रमारविंत'), 'अरविन्द'),
+    (dev_word('क्रमारविंत पालीवाल'), 'अरविन्द पालीवाल'),
+    (dev_word('क्रमानीता'), 'अनीता'),
+    (dev_word('क्रमानीता पालीवाल'), 'अनीता पालीवाल'),
+    (dev_word('जलगा राम'), 'जोगा राम'),
+    (dev_word('जलगा'), 'जोगा'),
+    (dev_word('जलगाराम'), 'जोगाराम'),
+    (dev_word('जलरा राम'), 'जोरा राम'),
+    (dev_word('जलरा'), 'जोरा'),
+    (dev_word('जलरारा'), 'जोराराम'),
+    (dev_word('जलधा राम'), 'जोधा राम'),
+    (dev_word('जलधा'), 'जोधा'),
+    (dev_word('संतलष'), 'संतोष'),
+    (dev_word('पवेश'), 'भावेश'),
+    (dev_word('पवेश कुमार'), 'भावेश कुमार'),
+    (re.compile(r'([क-ह])वतल\b'), r'\1वती'),
+    (re.compile(r'([क-ह])ुन्द्र\b'), r'\1चन्द्र'),
+    (re.compile(r'\bक्रमा([अ-ह])'), r'\1'),
 ]
 
 ENDRA_CONJUNCT_RULES = [
@@ -409,24 +699,6 @@ def normalize_electoral_hindi(text: str) -> str:
     s = re.sub(r'मांग्[ााुू]+राम', 'मांगूराम', s)
     s = re.sub(r'पं[ठेेप]+ सिंह', 'प्रताप सिंह', s)
 
-    # Universal ligature glitch: रर inside words (e.g. सररता -> सरिता, दररया -> दरिया)
-    s = re.sub(r'([क-ह])रर([क-हए-औ])', r'\1रि\2', s)
-
-    # Universal Remington Shift-K Typist Error (100-Crore Rule):
-    # In Remington / KrutiDev keyboard layouts, lowercase 'k' generates 'ा' (Aa matra),
-    # while Shift+'K' produces 'अ' (independent vowel 'A').
-    # In Devanagari phonology, an independent 'अ' NEVER immediately follows a consonant [क-ह] inside a name.
-    # Therefore, any [क-ह]अ sequence inside a name is 100% a typist Shift-K typo for [क-ह]ा (e.g. लअ->ला, कअ->का, मअ->मा, रअ->रा, तअ->ता).
-    s = re.sub(r'([क-ह])अ', r'\1ा', s)
-
-    # Universal Rakar Suffix Typist Error:
-    # Typists frequently hit the subscript rakar ligature (ध्र, घ्र, श्व्र, ह्र) instead of regular 'र' (धर, श्वर, हर).
-    # e.g., लीलाध्र -> लीलाधर, मुरलीध्र -> मुरलीधर, विद्याध्र -> विद्याधर, गंगाध्र -> गंगाधर, रामेश्व्र -> रामेश्वर
-    s = re.sub(r'([ािीुूेैोौ]|\b[क-ह]+)[धघ]्र\b', r'\1धर', s)
-    s = re.sub(r'([ािीुूेैोौ])श्व्र\b', r'\1श्वर', s)
-    s = re.sub(r'([ािीुूेैोौ])ह्र\b', r'\1हर', s)
-    s = re.sub(r'([ािीुूेैोौ])द्र\b', r'\1दर', s)  # e.g. दामोद्र -> दामोदर (except known -ndra names handled in ENDRA_CONJUNCT_RULES)
-
     # 1. Universal -ेन्द्र / -ेंद्र and conjunct half-matra fixes
     for regex, rep in ENDRA_CONJUNCT_RULES:
         if regex.pattern.startswith('('):
@@ -445,22 +717,29 @@ def normalize_electoral_hindi(text: str) -> str:
     return re.sub(r'\s+', ' ', s).strip()
 
 def strip_name_from_relative(voter_name: str, rel_name: str) -> str:
-    """Strictly prevents voter name from repeating inside father/husband name."""
+    """Strictly prevents voter name from repeating inside father/husband name without corrupting suffixes."""
     if not voter_name or not rel_name:
         return rel_name or ""
     vn = voter_name.strip()
     rn = rel_name.strip()
     if not rn or not vn:
         return rn
-    if rn.startswith(vn):
-        rn = rn[len(vn):].strip()
-        return rn
+
+    HONORIFIC_SUFFIXES = {'राम', 'देवी', 'लाल', 'सिंह', 'कुमार', 'कुमारी', 'बाई', 'प्रसाद', 'दास', 'चंद', 'चन्द', 'नाथ', 'कंवर'}
+
+    if rn.startswith(vn) and len(rn) > len(vn):
+        remainder = rn[len(vn):].strip()
+        if len(remainder) >= 3 and remainder not in HONORIFIC_SUFFIXES:
+            return remainder
+
     vn_tokens = vn.split()
     rn_tokens = rn.split()
-    if len(vn_tokens) > 0 and len(rn_tokens) > 1:
-        first_v = vn_tokens[0]
-        if rn_tokens[0] == first_v and len(first_v) >= 2 and first_v not in ['देवी', 'राम', 'लाल', 'सिंह', 'बाई', 'कुमार']:
-            rn = " ".join(rn_tokens[1:]).strip()
+    if len(vn_tokens) >= 2 and len(rn_tokens) > len(vn_tokens):
+        if rn_tokens[:len(vn_tokens)] == vn_tokens:
+            remainder = " ".join(rn_tokens[len(vn_tokens):]).strip()
+            if len(remainder) >= 3 and remainder not in HONORIFIC_SUFFIXES:
+                return remainder
+
     return rn
 
 # ==============================================================================
@@ -539,17 +818,46 @@ def decode_hashes_to_hindi(hash_list):
     for h in hash_list:
         if h == 'SPACE':
             tokens.append(('SPACE', ' '))
-        elif h in PRE_BASE_HASHES:
-            tokens.append(('PRE_I', GLYPH_HASH_TO_HINDI.get(h, 'ि')))
-        elif h in REPH_HASHES:
-            tokens.append(('REPH', 'र्'))
+            continue
+        s = GLYPH_HASH_TO_HINDI.get(h, '')
+        if not s or s == '◌':
+            continue
+        if s in ['िर्', 'िर्ं']:
+            tokens.append(('PRE_I_REPH', s))
+        elif s in ['ि', 'िं']:
+            tokens.append(('PRE_I', s))
+        elif 'र्' in s:
+            tokens.append(('REPH_COMP', s))
+        elif s in MATRA_CHARS or any(s.startswith(m) for m in MATRA_CHARS):
+            tokens.append(('MATRA', s))
+        elif s.endswith('्'):
+            tokens.append(('HALF', s))
         else:
-            s = GLYPH_HASH_TO_HINDI.get(h, '')
-            is_matra = (s in MATRA_CHARS)
-            is_half = s.endswith('्') and len(s) >= 2 and not is_matra
-            tokens.append(('MATRA' if is_matra else ('HALF' if is_half else 'CONS'), s))
+            tokens.append(('CONS', s))
 
-    # Rule 1: Chhoti-i ('ि' / 'िं') ko agle consonant ke baad lagao
+    # Rule 0: Chhoti-i with Reph ('िर्' / 'िर्ं') placed before next consonant cluster
+    i = 0
+    while i < len(tokens):
+        if tokens[i][0] == 'PRE_I_REPH':
+            reph_tok = tokens[i]
+            matra_val = 'िं' if 'िं' in reph_tok[1] else 'ि'
+            j = i + 1
+            while j < len(tokens) and tokens[j][0] == 'HALF':
+                j += 1
+            if j < len(tokens) and tokens[j][0] == 'CONS':
+                cons_tok = tokens[j]
+                tokens.pop(j)
+                tokens.pop(i)
+                tokens.insert(i, ('HALF', 'र्'))
+                tokens.insert(i + 1, cons_tok)
+                tokens.insert(i + 2, ('MATRA', matra_val))
+                i += 3
+            else:
+                i += 1
+        else:
+            i += 1
+
+    # Rule 1: Chhoti-i ('ि' / 'िं') ko agle consonant / conjunct cluster ke baad lagao
     i = 0
     while i < len(tokens):
         if tokens[i][0] == 'PRE_I':
@@ -564,11 +872,16 @@ def decode_hashes_to_hindi(hash_list):
         else:
             i += 1
 
-    # Rule 2: Reph ('र्') ko pichle consonant se pehle lagao
+    # Rule 2: Reph ('र्' / 'ीर्' / 'ेर्' / 'ोर्' / 'ेर्ं') ko pichle consonant cluster se pehle lagao
+    # Agar token me matra bhi hai (jaise 'ीर्', 'ेर्'), toh matra us consonant ke baad rahegi aur 'र्' pehle jayega
     i = 0
     while i < len(tokens):
-        if tokens[i][0] == 'REPH':
+        if tokens[i][0] == 'REPH_COMP':
+            s = tokens[i][1]
+            matra_part = s.replace('र्', '')
             tokens.pop(i)
+            if matra_part:
+                tokens.insert(i, ('MATRA', matra_part))
             j = i - 1
             while j >= 0 and tokens[j][0] == 'MATRA':
                 j -= 1
@@ -577,7 +890,7 @@ def decode_hashes_to_hindi(hash_list):
             while j >= 0 and tokens[j][0] == 'HALF':
                 j -= 1
             tokens.insert(j + 1, ('HALF', 'र्'))
-            i += 1
+            i += (1 if matra_part else 0)
         else:
             i += 1
 
@@ -587,21 +900,6 @@ def decode_hashes_to_hindi(hash_list):
 # ==============================================================================
 # 5. PDF STREAM PARSER & VOTER BOX EXTRACTOR
 # ==============================================================================
-def decode_pdf_string_bytes(raw_s):
-    b_list, i = [], 0
-    while i < len(raw_s):
-        if raw_s[i] == '\\' and i + 1 < len(raw_s):
-            nxt = raw_s[i+1]
-            if nxt in ['(', ')', '\\']:
-                b_list.append(ord(nxt)); i += 2
-            elif nxt.isdigit():
-                b_list.append(int(raw_s[i+1:i+4], 8)); i += 4
-            else:
-                b_list.append(ord(nxt)); i += 2
-        else:
-            b_list.append(ord(raw_s[i])); i += 1
-    return b_list
-
 def parse_pdf_stream_tokens(stream_str):
     x, y, lm_x, lm_y = 0.0, 0.0, 0.0, 0.0
     curr_font = None
@@ -621,238 +919,34 @@ def parse_pdf_stream_tokens(stream_str):
             curr_font = line.split()[0]
         elif line.endswith(' Tj') and line.startswith('('):
             raw_s = line[1:-4]
-            b_list = decode_pdf_string_bytes(raw_s)
+            b_list, i = [], 0
+            while i < len(raw_s):
+                if raw_s[i] == '\\' and i + 1 < len(raw_s):
+                    nxt = raw_s[i+1]
+                    if nxt in ['(', ')', '\\']:
+                        b_list.append(ord(nxt)); i += 2
+                    elif nxt.isdigit():
+                        b_list.append(int(raw_s[i+1:i+4], 8)); i += 4
+                    else:
+                        b_list.append(ord(nxt)); i += 2
+                else:
+                    b_list.append(ord(raw_s[i])); i += 1
             items.append((round(x, 1), round(y, 1), curr_font, b_list))
-        elif line.endswith(' TJ'):
-            arr_str = line[:-3].strip()
-            if arr_str.startswith('[') and arr_str.endswith(']'):
-                pieces = re.findall(r'\((?:\\.|[^\\()])*\)', arr_str)
-                for p in pieces:
-                    b_list = decode_pdf_string_bytes(p[1:-1])
-                    if b_list:
-                        items.append((round(x, 1), round(y, 1), curr_font, b_list))
     return items
 
-def clean_house_val(val):
-    if not val:
-        return ""
-    val = str(val).strip()
-    val = re.sub(r'^(?:मकान|संख्या|मकरन|सपखजर|सपखसर|गृह|house|no|ward|room|flat)[:ः\.\-\s]*', '', val, flags=re.I).strip()
-    val = re.sub(r'[,:ः\.\s]+$', '', val).strip()
-    val = re.sub(r'\s+', ' ', val)
-    val = re.sub(r'(\d)\s+([क-हए-औA-Za-z])(?!\w)', r'\1\2', val)
-    val = re.sub(r'\s*-\s*', '-', val)
-    if not val or val in ['-', '--', 'nil', 'na', 'none', 'n/a', 'null', 'undefined', 'लागू नहीं', 'उपलब्ध नहीं', 'शून्य']:
-        return ""
-    if re.fullmatch(r'0+', val):
-        return ""
-    m_lead = re.match(r'^0+([1-9]\d*(?:[A-Za-zक-हए-औ\/\-].*)?)$', val)
-    if m_lead:
-        val = m_lead.group(1)
-    return val
-
-SURNAMES_FOR_MATCH = {
-    'चौधरी', 'सिंह', 'कंवर', 'सियाग', 'सेवर', 'फंगाल', 'पिन्डे ल', 'पिन्डेल', 'बिश्नोई',
-    'जाट', 'मेघवाल', 'कुम्हार', 'शर्मा', 'वर्मा', 'सुथार', 'गोदारा', 'सारण', 'बेनीवाल',
-    'खत्री', 'देवी', 'बाई', 'कुमार', 'राम'
-}
-
-def get_base_devanagari_name(name):
-    if not name:
-        return ""
-    s = re.sub(r'^(?:श्री|श्रीमती|स्व\.|स्वर्गीय|डॉ\.|मा\.|पं\.)\s*', '', str(name).strip())
-    s = re.sub(r'\s+', ' ', s)
-    words = s.split()
-    if len(words) > 1 and words[-1] in SURNAMES_FOR_MATCH:
-        words = words[:-1]
-    return ''.join(words).replace('ं', 'न').replace('ँ', 'न')
-
-def resolve_and_normalize_family_house_numbers(voters_dict):
-    """
-    Intelligently resolves missing ('-') or zero ('0', '00') house numbers
-    by linking voters to their spouse, father, or sibling's verified house in the same roll.
-    Also strips leading zeroes (e.g. '02' -> '2') and normalizes empty records to '-'.
-    """
-    if not voters_dict:
-        return
-
-    # 1. Clean existing house numbers
-    for s_num, v in voters_dict.items():
-        raw_h = v.get('मकान संख्या') or v.get('house_no') or ''
-        cleaned_h = clean_house_val(raw_h)
-        v['मकान संख्या'] = cleaned_h
-        v['house_no'] = cleaned_h
-        v['house_no_hi'] = cleaned_h
-
-    # 2. Build verified reference pool of voters with genuine house numbers
-    valid_pool = [v for v in voters_dict.values() if v.get('house_no')]
-
-    # 3. Resolve for voters with empty house numbers
-    for s_num, v in voters_dict.items():
-        if v.get('house_no'):
-            continue
-
-        rel_type = v.get('संबंध प्रकार') or v.get('relation') or 'पिता'
-        rel_name = (v.get('संबंधी का नाम') or v.get('relative_name_hi') or '').strip()
-        base_rel = get_base_devanagari_name(rel_name)
-        if not base_rel:
-            continue
-
-        candidates = []
-        for cand in valid_pool:
-            c_base_name = get_base_devanagari_name(cand.get('मतदाता का नाम') or cand.get('name_hi'))
-            c_s_num = cand.get('क्रमांक') or cand.get('serial') or 0
-            dist = abs(c_s_num - s_num)
-
-            # Priority 1: Direct spouse or parent match
-            if base_rel == c_base_name or base_rel in c_base_name or c_base_name in base_rel:
-                candidates.append((dist, 1, cand['house_no']))
-
-            # Priority 2: Sibling match (sharing same parent name)
-            c_rel_name = get_base_devanagari_name(cand.get('संबंधी का नाम') or cand.get('relative_name_hi'))
-            if c_rel_name and (base_rel == c_rel_name or base_rel in c_rel_name or c_rel_name in base_rel):
-                candidates.append((dist, 2, cand['house_no']))
-
-        if candidates:
-            # Sort by priority (direct match priority 1 first), then closest distance in roll
-            candidates.sort(key=lambda x: (x[1], x[0]))
-            best_h = candidates[0][2]
-            v['मकान संख्या'] = best_h
-            v['house_no'] = best_h
-            v['house_no_hi'] = best_h
-
-    # 4. Final pass: Ensure any still unresolved house numbers are clean '-' (never '0' or '00')
-    for v in voters_dict.values():
-        h = v.get('house_no') or ''
-        final_h = h if h else '-'
-        v['मकान संख्या'] = final_h
-        v['house_no'] = final_h
-        v['house_no_hi'] = final_h
-
-def reconcile_family_relative_names(voters_dict):
-    """
-    Algorithmic Family Relationship Reconciliation (Universal 100-Crore Rule):
-    In government electoral rolls, typists frequently introduce typos into relative names
-    (e.g., typing 'लीलअध्र' or 'लीलअध' on the wife's card instead of 'लीलाधर',
-    or typing 'धना राम' instead of 'धनाराम', 'सवाइर्राम' instead of 'सवाईराम',
-    'जशराज' instead of 'जसराज', 'गज्जा राम' instead of 'गजाराम', 'आसुलाल' instead of 'आसूलाल').
-    
-    This function scans voters within the same household (same house_no) or immediate
-    neighborhood serials (dist <= 12). If a voter's relative (husband/father/mother) is a close
-    match (exact-no-space, normalized-vowel, prefix/suffix typo, or edit distance <= 2)
-    to a verified resident voter in that household, we SNAP the relative name to the
-    verified voter's canonical name!
-    
-    This preserves 100% of family trees, prevents broken families, and works algorithmically
-    across ALL 100 crore voters in India without needing static dictionaries.
-    """
-    if not voters_dict:
-        return
-
-    house_groups = defaultdict(list)
-    for s_num, v in voters_dict.items():
-        h = (v.get('मकान संख्या') or v.get('house_no') or '').strip()
-        if h and h != '-':
-            house_groups[h].append((s_num, v))
-
-    def normalize_for_comparison(name):
-        if not name:
-            return ''
-        s = name.strip()
-        s = re.sub(r'\s+', '', s)
-        s = s.replace('ू', 'ु').replace('ी', 'ि').replace('ो', 'ौ').replace('े', 'ै')
-        s = s.replace('ं', 'न').replace('ण', 'न').replace('श', 'स').replace('ष', 'स')
-        s = s.replace('व', 'ब')
-        # Remington shift-k typo: लअ -> ला
-        s = re.sub(r'([क-ह])अ', r'\1ा', s)
-        # Suffix typo: ध्र/घ्र -> धर
-        s = re.sub(r'([ािीुूेैोौ]|\b[क-ह]+)[धघ]्र\b', r'\1धर', s)
-        return s
-
-    for s_num, v in voters_dict.items():
-        rel_name = (v.get('संबंधी का नाम') or v.get('relative_name_hi') or '').strip()
-        rel_type = (v.get('संबंध प्रकार') or v.get('relation') or '').strip()
-        house_no = (v.get('मकान संख्या') or v.get('house_no') or '').strip()
-        v_name = (v.get('मतदाता का नाम') or v.get('name_hi') or '').strip()
-        v_gender = (v.get('लिंग') or v.get('gender') or '').strip()
-        v_age = v.get('आयु') or v.get('age') or 0
-        try:
-            v_age = int(v_age)
-        except (ValueError, TypeError):
-            v_age = 0
-
-        if not rel_name:
-            continue
-
-        candidates = []
-        if house_no and house_no != '-' and house_no in house_groups:
-            for cand_s_num, cand_v in house_groups[house_no]:
-                if cand_s_num != s_num:
-                    candidates.append((cand_s_num, cand_v, 1))
-
-        for cand_s_num, cand_v in voters_dict.items():
-            if cand_s_num != s_num and abs(cand_s_num - s_num) <= 12:
-                if not any(c[0] == cand_s_num for c in candidates):
-                    candidates.append((cand_s_num, cand_v, 2))
-
-        rel_norm = normalize_for_comparison(rel_name)
-        rel_nospace = rel_name.replace(' ', '')
-        best_match = None
-        best_score = 0.0
-
-        for cand_s_num, cand_v, priority in candidates:
-            c_name = (cand_v.get('मतदाता का नाम') or cand_v.get('name_hi') or '').strip()
-            if not c_name or c_name == v_name:
-                continue
-            c_gender = (cand_v.get('लिंग') or cand_v.get('gender') or '').strip()
-            c_age = cand_v.get('आयु') or cand_v.get('age') or 0
-            try:
-                c_age = int(c_age)
-            except (ValueError, TypeError):
-                c_age = 0
-
-            # Plausibility checks based on relation type:
-            if 'पति' in rel_type:
-                if 'स' in c_gender or 'महिला' in c_gender or 'F' in c_gender:
-                    continue
-            elif 'पिता' in rel_type:
-                if 'स' in c_gender or 'महिला' in c_gender or 'F' in c_gender:
-                    continue
-                if v_age > 0 and c_age > 0 and c_age < v_age:
-                    continue
-            elif 'माता' in rel_type:
-                if 'पु' in c_gender or 'M' in c_gender:
-                    continue
-                if v_age > 0 and c_age > 0 and c_age < v_age:
-                    continue
-
-            c_nospace = c_name.replace(' ', '')
-            c_norm = normalize_for_comparison(c_name)
-
-            if rel_nospace == c_nospace:
-                score = 1.0
-            elif rel_norm == c_norm:
-                score = 0.98
-            elif len(rel_norm) >= 3 and len(c_norm) >= 3 and (c_norm.startswith(rel_norm) or rel_norm.startswith(c_norm)):
-                score = 0.92 if abs(len(c_norm) - len(rel_norm)) <= 2 else 0.80
-            else:
-                score = difflib.SequenceMatcher(None, rel_norm, c_norm).ratio()
-
-            weighted_score = score if priority == 1 else (score * 0.90)
-
-            if weighted_score > best_score:
-                best_score = weighted_score
-                best_match = c_name
-
-        if best_score >= 0.74 and best_match and best_match != rel_name:
-            v['संबंधी का नाम'] = best_match
-            v['relative_name_hi'] = best_match
-            if v.get('relative_name_en') or v.get('name_en'):
-                v['relative_name_en'] = transliterate_hindi(best_match)
-
-def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_deleted=False):
+def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_deleted=False, photos_dir=None):
     reader = pypdf.PdfReader(pdf_path)
     bn = os.path.basename(pdf_path)
+
+    fitz_doc = None
+    if photos_dir:
+        try:
+            import fitz
+            os.makedirs(photos_dir, exist_ok=True)
+            fitz_doc = fitz.open(pdf_path)
+        except Exception as e:
+            print(f"[PhotoExtraction] Failed to init fitz: {e}")
+            fitz_doc = None
     
     # 1. Extract Ward from Filename or Cover
     ward_no = default_ward
@@ -924,6 +1018,27 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
 
     # Pass 2: High-Precision Voter Card Extraction
     for p_idx in range(2, len(reader.pages) - 1):
+        candidate_photos = []
+        if fitz_doc and p_idx < len(fitz_doc):
+            try:
+                page_fitz = fitz_doc[p_idx]
+                img_infos = page_fitz.get_image_info(xrefs=True)
+                for info in img_infos:
+                    bbox = info.get('bbox', ())
+                    if len(bbox) == 4:
+                        x0, y0, x1, y1 = bbox
+                        w = x1 - x0
+                        h = y1 - y0
+                        if 30 <= w <= 85 and 40 <= h <= 95:
+                            candidate_photos.append({
+                                'xref': info['xref'],
+                                'cx': (x0 + x1) / 2.0,
+                                'cy': (y0 + y1) / 2.0,
+                                'bbox': bbox
+                            })
+            except Exception as e:
+                candidate_photos = []
+
         page = reader.pages[p_idx]
         res = page['/Resources'].get_object()
         if '/XObject' not in res:
@@ -978,10 +1093,10 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                 else:
                     cb_x = 380.0
 
-                epic_tokens = []
+                epic_no = ""
                 house_no = ""
-                house_no_tokens = []
                 age_val = 30
+                epic_tokens = []
                 name_hashes = []
                 rel_hashes = []
                 rel_type_hashes = []
@@ -992,7 +1107,7 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                         continue
                     txt = ''.join(chr(c) for c in b).strip()
 
-                    # EPIC No candidate tokens on top card header
+                    # EPIC No (supports single-token and multi-token fragmented headers)
                     if sy - 5.0 <= y <= sy + 5.0 and cb_x + 25.0 <= x <= cb_x + 165.0 and f != '/9':
                         if txt and not (txt.isdigit() and len(txt) <= 4 and abs(x - sx) < 5.0):
                             epic_tokens.append((x, txt))
@@ -1012,12 +1127,18 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                             elif f != '/9' and ' ' in ''.join(chr(c) for c in b): rel_hashes.append('SPACE')
 
                     # House No line
-                    elif sy - 48.5 <= y <= sy - 32.0:
-                        if cb_x + 35.0 <= x <= cb_x + 130.0:
-                            if f == '/9':
-                                house_no_tokens.append((x, decode_hashes_to_hindi([ch_hash.get(c, '') for c in b])))
-                            else:
-                                house_no_tokens.append((x, txt))
+                    elif sy - 48.5 <= y <= sy - 32.0 and f != '/9':
+                        c_cand = re.sub(r'^[ :ः\.\-]+', '', txt).strip()
+                        c_cand = re.sub(r'^(?:मकान|संख्या|मकरन|सपखजर|सपखसर|गृह|house|no)[:ः\.\-\s]*', '', c_cand, flags=re.I).strip()
+                        c_cand = re.sub(r'[,:ः\.\s]+$', '', c_cand).strip()
+                        if c_cand and any(ch.isdigit() for ch in c_cand) and not any(k in c_cand for k in ['Photo', 'EPIC', 'RJ/', 'VOTER']):
+                            if re.match(r'^0+$', c_cand):
+                                c_cand = '-'
+                            elif re.match(r'^0+\d+$', c_cand):
+                                c_cand = str(int(c_cand))
+                            elif re.match(r'^0+\d+', c_cand):
+                                c_cand = re.sub(r'^0+(\d+)', r'\1', c_cand)
+                            house_no = c_cand
 
                     # Age & Gender line
                     elif sy - 58.0 <= y <= sy - 49.0:
@@ -1025,38 +1146,25 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                             p_age = int(txt)
                             if 18 <= p_age <= 125:
                                 age_val = p_age
-                            elif p_age < 18:
-                                age_val = 20 + p_age
+                            elif 0 < p_age < 18:
+                                age_val = p_age
                         elif f == '/9' and x >= cb_x + 70.0:
                             gen_hashes.extend([ch_hash.get(c, '') for c in b])
 
-                epic_no = ""
-                if epic_tokens:
+                if epic_tokens and not epic_no:
                     epic_tokens.sort(key=lambda it: it[0])
-                    joined_epic_line = "".join(t[1] for t in epic_tokens).strip()
+                    joined_epic_line = ''.join(t[1] for t in epic_tokens).strip()
                     ep_m = re.search(r'(?:[A-Z]{2,4}\s*[\/\-]?\s*\d{6,8}|[A-Z]{2,3}\s*[\/\-]\s*\d{1,3}\s*[\/\-]\s*\d{1,3}\s*[\/\-]\s*\d{3,7}|[A-Z0-9]{3}[0-9OIBLSZG]{7})', joined_epic_line, re.I)
                     if ep_m:
-                        epic_no = ep_m.group(0).replace(" ", "").upper()
+                        epic_no = ep_m.group(0).replace(' ', '').upper()
                     else:
                         for it in epic_tokens:
                             if len(it[1]) >= 7 and any(c.isdigit() for c in it[1]) and any(c.isalpha() for c in it[1]):
-                                epic_no = it[1].replace(" ", "").upper()
+                                epic_no = it[1].replace(' ', '').upper()
                                 break
 
-                if house_no_tokens:
-                    house_no_tokens.sort(key=lambda it: it[0])
-                    raw_hn = ' '.join(t[1] for t in house_no_tokens if t[1]).strip()
-                    raw_hn = re.sub(r'^[ :ः\.\-]+', '', raw_hn).strip()
-                    raw_hn = re.sub(r'^(?:मकान|संख्या|मकरन|सपखजर|सपखसर|गृह|house|no)[:ः\.\-\s]*', '', raw_hn, flags=re.I).strip()
-                    raw_hn = re.sub(r'[,:ः\.\s]+$', '', raw_hn).strip()
-                    raw_hn = re.sub(r'\s+', ' ', raw_hn)
-                    raw_hn = re.sub(r'(\d)\s+([क-हए-औA-Za-z])(?!\w)', r'\1\2', raw_hn)
-                    raw_hn = re.sub(r'\s*-\s*', '-', raw_hn)
-                    if raw_hn and not any(k in raw_hn for k in ['Photo', 'EPIC', 'RJ/', 'VOTER']):
-                        house_no = raw_hn
-
-                name_hi = decode_hashes_to_hindi(name_hashes)
-                rel_hi = decode_hashes_to_hindi(rel_hashes)
+                name_hi = sandhi_viched(decode_hashes_to_hindi(name_hashes))
+                rel_hi = sandhi_viched(decode_hashes_to_hindi(rel_hashes))
                 rel_t_hi = decode_hashes_to_hindi(rel_type_hashes)
                 gen_hi = decode_hashes_to_hindi(gen_hashes)
 
@@ -1064,13 +1172,68 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                 rel_hi = strip_name_from_relative(name_hi, rel_hi)
 
                 rel_type = "पति" if "पति" in rel_t_hi else ("माता" if "माता" in rel_t_hi else "पिता")
-                gender = "स्त्री" if ("स्त्र" in gen_hi or rel_type == "पति") else "पुरुष"
+                
+                # Multi-layer gender detection
+                FEMALE_NAME_MARKERS = {'देवी', 'कंवर', 'बाई', 'कुमारी', 'बेगम', 'बानू', 'कांता', 'शांता', 'कमला', 'मंजू', 'सुशीला', 'संतोष', 'पूजा', 'रेखा', 'अनिता', 'सुनीता', 'प्रियंका', 'दीक्षा', 'कविता', 'आशा', 'ममता', 'संगीता', 'मोनिका', 'सरोज', 'ललिता', 'उर्मिला', 'विमला', 'किरण', 'पप्पूड़ी', 'बदामी'}
+                MALE_NAME_MARKERS = {'राम', 'लाल', 'सिंह', 'कुमार', 'चन्द', 'चंद', 'प्रसाद', 'दीन', 'नाथ', 'गिरी', 'पूरी', 'पुरी', 'प्रकाश', 'भंवर', 'किशन', 'गोपाल', 'महेन्द्र', 'सुरेन्द्र', 'राजेन्द्र', 'नरेश', 'मुकेश', 'दिनेश', 'सुरेश', 'रमेश', 'राकेश', 'अनिल', 'सुनील', 'विकास', 'अशोक', 'विनोद', 'प्रमोद', 'प्रदीप', 'संदीप', 'दीपक', 'मनोज', 'संजय', 'अजय', 'विजय', 'चिराग', 'हसमुख', 'नेमाराम'}
+                
+                if rel_type == "पति" or "स्त्र" in gen_hi or "महिला" in gen_hi:
+                    gender = "स्त्री"
+                elif any(fm in name_hi for fm in FEMALE_NAME_MARKERS):
+                    gender = "स्त्री"
+                elif any(mm in name_hi for mm in MALE_NAME_MARKERS):
+                    gender = "पुरुष"
+                else:
+                    gender = "स्त्री" if "स्त्र" in gen_hi else "पुरुष"
                 status = "विलोपित" if s_num in deletions_serials else "सक्रिय"
 
                 # Filter out deleted voters when include_deleted is False (default)
                 # This guarantees that the exported active voter count matches the official Election Commission summary
                 if not include_deleted and s_num in deletions_serials:
                     continue
+
+                # Match voter to photo if photos_dir is enabled
+                photo_filename = ""
+                if fitz_doc and candidate_photos:
+                    col = 1 if sx < 150 else (2 if sx < 320 else 3)
+                    expected_cx = 184.4 if col == 1 else (357.9 if col == 2 else 531.4)
+                    expected_cy = abs(sy) + 28.0
+                    best_img = None
+                    min_dist = float('inf')
+                    for c_img in candidate_photos:
+                        dx = abs(c_img['cx'] - expected_cx)
+                        dy = abs(c_img['cy'] - expected_cy)
+                        if dx <= 30.0 and dy <= 30.0:
+                            dist = (dx**2 + dy**2)**0.5
+                            if dist < min_dist:
+                                min_dist = dist
+                                best_img = c_img
+                    if best_img:
+                        try:
+                            pix = fitz.Pixmap(fitz_doc, best_img['xref'])
+                            if pix.n >= 5:
+                                pix = fitz.Pixmap(fitz.csRGB, pix)
+                            clean_s = re.sub(r'[^a-zA-Z0-9_\-]', '_', str(epic_no or f"VOTER_{ward_no}_{part_no}_{s_num}"))
+                            photo_filename = f"{clean_s}_{s_num}.webp"
+                            target_save_path = os.path.join(photos_dir, photo_filename)
+                            try:
+                                from PIL import Image, ImageEnhance
+                                import io
+                                pil_img = Image.open(io.BytesIO(pix.tobytes('png')))
+                                # High-quality 2.5x upscale using Lanczos to avoid browser bilinear blur on small 43x60 stamps
+                                if pil_img.width < 100:
+                                    target_w = int(pil_img.width * 2.5)
+                                    target_h = int(pil_img.height * 2.5)
+                                    pil_img = pil_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+                                    # Subtle edge sharpening
+                                    enhancer = ImageEnhance.Sharpness(pil_img)
+                                    pil_img = enhancer.enhance(1.3)
+                                pil_img.save(target_save_path, 'WEBP', quality=95)
+                            except Exception:
+                                photo_filename = f"{clean_s}_{s_num}.png"
+                                pix.save(os.path.join(photos_dir, photo_filename))
+                        except Exception as pe:
+                            photo_filename = ""
 
                 voters_dict[s_num] = {
                     'क्रमांक': s_num,
@@ -1091,30 +1254,45 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                     'ward': str(ward_no),
                     'part': str(part_no),
                     'serial': s_num,
-                    'name_en': '',  # Pure Hindi Data Only
+                    'name_en': transliterate_hindi(name_hi),
                     'name_hi': name_hi or 'मतदाता',
                     'age': age_val,
                     'gender': gender,
                     'relation': rel_type,
-                    'relative_name_en': '',  # Pure Hindi Data Only
+                    'relative_name_en': transliterate_hindi(rel_hi),
                     'relative_name_hi': rel_hi or '-',
                     'house_no': house_no or '-',
                     'house_no_hi': house_no or '-',
                     'mobile': '',
                     'caste': '',
                     'family_id': '',
-                    'village_en': '',  # Pure Hindi Data Only
+                    'village_en': transliterate_hindi(current_village_hi),
                     'village_hi': current_village_hi or '-',
-                    'status': status
+                    'status': status,
+                    'photo_file': photo_filename
                 }
+
+    if fitz_doc:
+        try:
+            if photos_dir:
+                manifest_items = [
+                    {
+                        'serial': v.get('serial'),
+                        'epic': v.get('epic'),
+                        'photo_file': v.get('photo_file', '')
+                    }
+                    for v in voters_dict.values()
+                    if v.get('photo_file')
+                ]
+                with open(os.path.join(photos_dir, 'photos_manifest.json'), 'w', encoding='utf-8') as f:
+                    json.dump(manifest_items, f, ensure_ascii=False, indent=2)
+            fitz_doc.close()
+        except Exception as fe:
+            print(f"[PhotoExtraction] Cleanup error: {fe}")
 
     if newly_learned_glyphs or newly_learned_words:
         save_learned_dictionary(newly_learned_glyphs, newly_learned_words)
         print(f"[Auto-Learner] Successfully surveyed & added {len(newly_learned_glyphs)} glyphs to dictionary from {bn}.")
-
-    # Multi-pass intelligent family house number resolution & leading-zero normalization
-    resolve_and_normalize_family_house_numbers(voters_dict)
-    reconcile_family_relative_names(voters_dict)
 
     return [voters_dict[k] for k in sorted(voters_dict.keys())]
 
@@ -1124,7 +1302,10 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
 COMMON_INDIAN_NAME_TRANSLATIONS = {
     'गंगा': 'Ganga', 'वासुदेव': 'Vasudev', 'नगाराम': 'Naga Ram', 'नखताराम': 'Nakhta Ram',
     'सुआ': 'Sua', 'पूनाराम': 'Poona Ram', 'निजरों': 'Nijro', 'पदमाराम': 'Padma Ram',
-    'ओम प्रकाश': 'Om Prakash', 'मुकेश': 'Mukesh', 'राधा कुमारी': 'Radha Kumari',
+    'ओम प्रकाश': 'Om Prakash', 'ओमप्रकाश': 'Om Prakash', 'प्रेम प्रकाश': 'Prem Prakash', 'प्रेमप्रकाश': 'Prem Prakash',
+    'ओमाराम': 'Oma Ram', 'ओमा राम': 'Oma Ram', 'प्रेमाराम': 'Prema Ram', 'प्रेमा राम': 'Prema Ram',
+    'ओमदास': 'Om Das', 'प्रेमदास': 'Prem Das', 'ओमनाथ': 'Om Nath', 'प्रेमनाथ': 'Prem Nath',
+    'मुकेश': 'Mukesh', 'राधा कुमारी': 'Radha Kumari',
     'कालूराम': 'Kalu Ram', 'छगन': 'Chhagan', 'छगनी': 'Chhagani', 'लीलाधर': 'Leeladhar',
     'तारों देवी': 'Taro Devi', 'भंवरूराम': 'Bhanwroo Ram', 'लीला': 'Leela',
     'पुरखाराम': 'Purkha Ram', 'मुढमा': 'Mudhma', 'गुमानाराम': 'Gumana Ram',
@@ -1141,9 +1322,72 @@ COMMON_INDIAN_NAME_TRANSLATIONS = {
     'शान्ति': 'Shanti', 'शान्ती': 'Shanti', 'कमला': 'Kamla', 'विमला': 'Vimla', 'निर्मला': 'Nirmala',
     'मंजू': 'Manju', 'अनिता': 'Anita', 'पूजा': 'Pooja', 'आरती': 'Aarti',
     'संतोष': 'Santosh', 'रेखा': 'Rekha', 'सुमन': 'Suman', 'कविता': 'Kavita',
-    'सवाई': 'Sawai', 'स्वरूप': 'Swaroop', 'हिम्मत': 'Himmat', 'उम्मेद': 'Ummed',
+    'सवाई': 'Sawai', 'स्वरूप': 'Swaroop', 'हिम्मत': 'Himmata', 'उम्मेद': 'Ummed',
     'श्रवण': 'Shravan', 'भीमाराम': 'Bheema Ram', 'गोरधन': 'Gordhan', 'घेवर': 'Ghevar',
-    'अभय': 'Abhay', 'भोम': 'Bhom', 'गुलाब': 'Gulab', 'सूरज': 'Suraj', 'इन्द्र': 'Indra'
+    'अभय': 'Abhay', 'भोम': 'Bhom', 'गुलाब': 'Gulab', 'सूरज': 'Suraj', 'इन्द्र': 'Indra',
+    
+    # Extended Rajasthan electoral lexicon & caste names
+    'चम्पालाल': 'Champalal', 'चमपालाल': 'Champalal', 'चम्पा': 'Champa', 'चमपा': 'Champa',
+    'चम्पाराम': 'Champaram', 'चमपाराम': 'Champaram', 'चम्पादास': 'Champadas', 'चमपादास': 'Champadas',
+    'पप्पू': 'Pappu', 'पपू': 'Pappu', 'पपपू': 'Pappu', 'सप्पू': 'Sappu', 'सपपू': 'Sappu',
+    'पप्पूड़ी': 'Pappudi', 'पपूडी': 'Pappudi', 'पप्पूराम': 'Pappuram', 'पपूराम': 'Pappuram',
+    'मोहम्मद': 'Mohammad', 'मोहममद': 'Mohammad', 'मौहममद': 'Mohammad',
+    'उत्तमचंद': 'Uttamchand', 'उतमचन्द': 'Uttamchand', 'उत्मचंद': 'Uttamchand', 'उतमचंद': 'Uttamchand',
+    'सांवलराम': 'Sanwalram', 'सावलराम': 'Sanwalram', 'सांवलाराम': 'Sanwalaram', 'सावलाराम': 'Sanwalaram',
+    'सांवल': 'Sanwal', 'सावल': 'Sanwal', 'सांवल सिंह': 'Sanwal Singh', 'सावलसिह': 'Sanwal Singh',
+    'भंवर सिंह': 'Bhanwar Singh', 'भंवरसिह': 'Bhanwar Singh', 'डूंगर सिंह': 'Dungar Singh', 'डूंगरसिह': 'Dungar Singh',
+    'हड़मान': 'Hadman', 'हडमान': 'Hadman', 'हड़मानराम': 'Hadmanram', 'हडमानराम': 'Hadmanram',
+    'हड़माना': 'Hadmana', 'हडमाना': 'Hadmana', 'हनुमान': 'Hanuman', 'हनुमानाराम': 'Hanumanaram',
+    'धूडचंद': 'Dhudchand', 'धूडचद': 'Dhudchand', 'धुडाराम': 'Dhudaram',
+    'जसराज': 'Jasraj', 'पारस': 'Paras', 'पारसमल': 'Parasmal', 'हीराराम': 'Heeraram',
+    'रुपाराम': 'Rooparam', 'खेताराम': 'Khetaram', 'खेता': 'Kheta',
+    'शंकरलाल': 'Shankarlal', 'गौतम': 'Gautam', 'गौतमचंद': 'Gautamchand', 'गौतमचन्द': 'Gautamchand',
+    'छगनाराम': 'Chhaganaram', 'छगना': 'Chhagana', 'छगनलाल': 'Chhaganlal',
+    'राणाराम': 'Ranaram', 'राणा': 'Rana', 'देमाराम': 'Demaram', 'देमा': 'Dema',
+    'मालाराम': 'Malaram', 'माला': 'Mala', 'जगाराम': 'Jagaram', 'जोगा': 'Joga',
+    'बीजाराम': 'Beejaram', 'गोबरराम': 'Gobarram', 'गोबर': 'Gobar', 'गीगाराम': 'Geegaram',
+    'राजू': 'Raju', 'राजूराम': 'Rajuram', 'दिलीप': 'Dilip', 'नेमा': 'Nema',
+    'ढलाराम': 'Dhalaram', 'ढला': 'Dhala', 'खेमप्रकाश': 'Khemprakash', 'हरीराम': 'Hariram',
+    'भूराराम': 'Bhuraram', 'तेजा': 'Teja', 'निरमा': 'Nirma', 'हेमाराम': 'Hemaram',
+    'मूलाराम': 'Moolaram', 'सुन्दर': 'Sundar', 'मांगी': 'Mangi', 'मांगीलाल': 'Mangilal',
+    'मोटाराम': 'Motaram', 'सोमती': 'Somati', 'दुर्गाराम': 'Durgaram', 'बाबु': 'Babu',
+    'बाबुलाल': 'Babulal', 'बाबूलाल': 'Babulal', 'मिश्रीमल': 'Mishrimal', 'मिश्रीलाल': 'Mishrilal',
+    'कमली': 'Kamli', 'हकाराम': 'Hakaram', 'सोमा': 'Soma', 'गोविन्द्राम': 'Govindram',
+    'जमना': 'Jamna', 'तुलसाराम': 'Tulsaram', 'तुलछा': 'Tulchha', 'बदामी': 'Badami',
+    'भगवती': 'Bhagwati', 'अणदाराम': 'Andaram', 'दीपनाथ': 'Deepnath', 'भंवराराम': 'Bhanwararam',
+    'गुडिया': 'Gudiya', 'रेशमी': 'Reshmi', 'रावता': 'Rawata', 'अचलाराम': 'Achalaram',
+    'लूणाराम': 'Loonaram', 'खीमाराम': 'Kheemaram', 'खीमा': 'Kheema', 'गणपत': 'Ganpat',
+    'आमबाराम': 'Ambaram', 'उम्मेदाराम': 'Ummedaram', 'चेनाराम': 'Chenaram',
+    'जेठाराम': 'Jetharam', 'अमृत': 'Amrit', 'अमृतलाल': 'Amritlal', 'भंवर': 'Bhanwar',
+    'भंवरलाल': 'Bhanwarlal', 'पुखराज': 'Pukhraj', 'पन्नालाल': 'Pannalal',
+    'सोहनलाल': 'Sohanlal', 'हीरालाल': 'Hiralal', 'मदनलाल': 'Madanlal',
+    'जीवाराम': 'Jeewaram', 'जीवा': 'Jeewa', 'जैसाराम': 'Jaisaram', 'चौथाराम': 'Chhotharam',
+    'जोगनाथ': 'Jognath', 'धर्माराम': 'Dharmaram', 'धर्मा': 'Dharma', 'डूंगर': 'Dungar',
+    'बगदाराम': 'Bagdaram', 'बगदा': 'Bagda', 'रामचन्द्र': 'Ramchandra', 'चन्दनमल': 'Chandanmal',
+    'लिखमाराम': 'Likhamaram', 'लिखमा': 'Likhma', 'पीराराम': 'Peeraram', 'देवा': 'Deva',
+    'लेखा': 'Lekha', 'लेखाराम': 'Lekharam', 'भोलाराम': 'Bholaram', 'नेता': 'Neta',
+    'गोपाराम': 'Goparam', 'सवाराम': 'Sawaram', 'केसा': 'Kesa', 'भीमनाथ': 'Bheemnath',
+    'रामनाथ': 'Ramnath', 'सलीम': 'Salim', 'अनवर': 'Anwar', 'सुजाराम': 'Soojaram',
+    'सूजाराम': 'Soojaram', 'गोमती': 'Gomati', 'मोहनी': 'Mohani', 'सरुपा': 'Saroopa',
+    'चेला': 'Chela', 'भीमराज': 'Bheemraj', 'चतराराम': 'Chatararam', 'करनाराम': 'Karanaram',
+    'धाराराम': 'Dhararam', 'शिवलाल': 'Shivlal', 'सरिता': 'Sarita', 'बादरराम': 'Badarram',
+    'जोगाराम': 'Jogaram', 'उकाराम': 'Ukaram', 'पिंका': 'Pinka', 'सोना': 'Sona',
+    'तेमाराम': 'Temaram', 'केवलराम': 'Kewalram', 'पारसनाथ': 'Parasnath', 'भीखनाथ': 'Bheekhnath',
+    'मनोहर': 'Manohar', 'जयनारायण': 'Jayanarayan', 'पदमाराम': 'Padmaram', 'पुरी': 'Puri',
+    'गोविन्द': 'Govind', 'गोविंद': 'Govind', 'सायरी': 'Sayari', 'भलाराम': 'Bhalaram',
+    'हस्तीमल': 'Hastimal', 'मेलाराम': 'Melaram', 'शंकरराम': 'Shankarram', 'मीठाराम': 'Meetharam',
+    'मांगाराम': 'Mangaram', 'चुनाराम': 'Chunararam', 'नेमी': 'Nemi', 'लूमबाराम': 'Loombaram',
+    'हरजी': 'Harji', 'वीराराम': 'Veerararam', 'भोमाराम': 'Bhomaram', 'भैराराम': 'Bhairaram',
+    'करण': 'Karan', 'मोमताराम': 'Momtaram', 'कालू': 'Kalu', 'तारा': 'Tara',
+    'इन्द्राराम': 'Indraram', 'दरिया': 'Dariya', 'नवाराम': 'Navaram', 'सुमेर': 'Sumer',
+    'मंगलनाथ': 'Mangalnath', 'गुलाबनाथ': 'Gulabnath', 'सुबान': 'Suban', 'नूर': 'Noor',
+    'खान': 'Khan', 'खां': 'Khan', 'बानो': 'Bano', 'बानू': 'Bano', 'बेगम': 'Begum',
+    'जांगिड़': 'Jangid', 'सुथार': 'Suthar', 'लोहार': 'Lohar', 'सोनी': 'Soni',
+    'दर्जी': 'Darji', 'गहलोत': 'Gehlot', 'गेहलोत': 'Gehlot', 'राठौड़': 'Rathore',
+    'भाटी': 'Bhati', 'सोलंकी': 'Solanki', 'चौहान': 'Chauhan', 'मेघवाल': 'Meghwal',
+    'विश्नोई': 'Bishnoi', 'बिश्नोई': 'Bishnoi', 'पालीवाल': 'Paliwal', 'पुरोहित': 'Purohit',
+    'माहेश्वरी': 'Maheshwari', 'ओसवाल': 'Oswal', 'सारस्वत': 'Saraswat', 'दाधीच': 'Dadhich',
+    'पारीक': 'Pareek', 'गुर्जर': 'Gurjar', 'देवासी': 'Dewasi', 'रबारी': 'Rabari', 'रायका': 'Raika'
 }
 
 DEV_VOWELS = {
@@ -1153,7 +1397,7 @@ DEV_VOWELS = {
 }
 
 DEV_MATRAS = {
-    'ा': 'a', 'ि': 'i', 'ी': 'i', 'ु': 'u', 'ू': 'u',
+    'ा': 'a', 'ि': 'i', 'ी': 'ee', 'ु': 'u', 'ू': 'oo',
     'ृ': 'ri', 'े': 'e', 'ै': 'ai', 'ो': 'o', 'ौ': 'au',
     'ं': 'n', 'ँ': 'n', 'ः': 'h', 'ॅ': 'e', 'ॉ': 'o'
 }
@@ -1167,22 +1411,23 @@ DEV_CONSONANTS = {
     'य': 'y', 'र': 'r', 'ल': 'l', 'व': 'v', 'श': 'sh',
     'ष': 'sh', 'स': 's', 'ह': 'h',
     'क्ष': 'ksh', 'त्र': 'tr', 'ज्ञ': 'gya', 'श्र': 'shr',
-    'क़': 'q', 'ख़': 'kh', 'ग़': 'gh', 'ज़': 'z', 'ड़': 'r',
-    'ढ़': 'rh', 'फ़': 'f'
+    'क़': 'q', 'ख़': 'kh', 'ग़': 'gh', 'ज़': 'z',
+    'ड़': 'd', 'ड़': 'd', '\u095C': 'd',
+    'ढ़': 'dh', 'ढ़': 'dh', '\u095D': 'dh',
+    'फ़': 'f'
 }
 
 COMPOUND_NAME_SUFFIXES = [
     ('राम', ' Ram'), ('लाल', ' Lal'), ('कुमार', ' Kumar'), ('कुमारी', ' Kumari'),
     ('सिंह', ' Singh'), ('कंवर', ' Kanwar'), ('देवी', ' Devi'), ('बाई', ' Bai'),
     ('प्रसाद', ' Prasad'), ('प्रकाश', ' Prakash'), ('चंद', ' Chand'), ('चन्द', ' Chand'),
-    ('चन्द्र', ' Chandra'), ('नारायण', ' Narayan'), ('नाथ', ' Nath'), ('दास', ' Das'),
-    ('शंकर', ' Shankar'), ('दीन', ' Deen'), ('भान', ' Bhan'), ('जीत', ' Jeet'),
-    ('पाल', ' Pal'), ('देव', ' Dev'), ('राज', ' Raj'), ('धर', ' Dhar'),
-    ('वल्लभ', ' Vallabh'), ('दत्त', ' Dutt'), ('वती', ' Vati'), ('मती', ' Mati'),
-    ('प्रिया', ' Priya'), ('रानी', ' Rani')
+    ('नाथ', ' Nath'), ('दास', ' Das'), ('शंकर', ' Shanker'), ('चन्द्र', ' Chandra'),
+    ('धर', ' Dhar'), ('भूषण', ' Bhushan'), ('शेखर', ' Shekhar'), ('वल्लभ', ' Vallabh'),
+    ('कांत', ' Kant'), ('कान्त', ' Kant'), ('मोहन', ' Mohan'), ('सुंदर', ' Sundar'),
+    ('सुन्दर', ' Sundar'), ('रंजन', ' Ranjan'), ('वर्धन', ' Vardhan'), ('मणि', ' Mani'),
+    ('मित्र', ' Mitra'), ('पुत्र', ' Putra'), ('स्वरूप', ' Swaroop'), ('नारायण', ' Narayan'),
+    ('ेंद्र', 'endra'), ('ेन्द्र', 'endra'), ('इंद्र', 'indra'), ('इन्द्र', 'indra')
 ]
-
-CONJUNCT_RETENTION_ENDINGS = ('न्द्र', 'त्र', 'प्र', 'क्र', 'ग्र', 'श्र', 'क्ल', 'ज्ञ', 'त्य', 'र्य', 'व्य', 'ष्ठ', 'स्थ', 'द्ध')
 
 KNOWN_SECTION_TRANSLATIONS = {
     'कुम्हारों की ढाणी, मावा': 'Kumharo Ki Dhani, Mawa',
@@ -1205,73 +1450,117 @@ def transliterate_token(token: str) -> str:
         return ''
     if token in COMMON_INDIAN_NAME_TRANSLATIONS:
         return COMMON_INDIAN_NAME_TRANSLATIONS[token]
-    chars = list(token)
-    n = len(chars)
-    res = []
-    i = 0
-    retains_final_a = any(token.endswith(conj) for conj in CONJUNCT_RETENTION_ENDINGS)
+    clean = token.strip()
+    if not clean:
+        return ''
 
+    chars = list(clean)
+    units = []
+    i = 0
+    n = len(chars)
     while i < n:
         c = chars[i]
-        if i + 1 < n and chars[i+1] == '़':
-            c = c + '़'
-            i += 1
+        next_c = chars[i + 1] if i + 1 < n else ''
+        combined = c + next_c
+        if combined in DEV_CONSONANTS:
+            i += 2
+            matra = ''
+            if i < n and chars[i] in DEV_MATRAS:
+                matra = chars[i]; i += 1
+            elif i < n and chars[i] == '्':
+                matra = '्'; i += 1
+            units.append({'type': 'CONS', 'char': combined, 'base': DEV_CONSONANTS[combined], 'matra': matra})
+            continue
+
         if c in DEV_VOWELS:
-            res.append(DEV_VOWELS[c].lower() if res else DEV_VOWELS[c])
+            matra = ''
+            if next_c in ('ं', 'ँ'):
+                matra = next_c; i += 1
+            units.append({'type': 'VOWEL', 'char': c, 'base': DEV_VOWELS[c], 'matra': matra})
+            i += 1
         elif c in DEV_CONSONANTS:
             base = DEV_CONSONANTS[c]
-            next_c = chars[i+1] if i + 1 < n else None
-            next_next = chars[i+2] if i + 2 < n else None
-            is_conjunct_member = (i >= 2 and chars[i-1] == '्')
-
-            if c == 'व':
-                if i > 0 and chars[i-1] in ('ं', 'न', 'स', 'र', 'ल', 'ई', 'त'):
-                    base = 'w'
-
-            if next_c == '्':
-                res.append(base)
-                i += 1
-            elif next_c in DEV_MATRAS:
-                res.append(base)
-                matra = next_c
-                if matra in ('ं', 'ँ'):
-                    if next_next and next_next in ('प', 'फ', 'ब', 'भ', 'म'):
-                        res.append('am')
-                    else:
-                        res.append('an')
-                elif matra == 'ी':
-                    if i <= 1 and (next_next is None or next_next in DEV_CONSONANTS):
-                        res.append('ee')
-                    else:
-                        res.append('i')
-                elif matra == 'ू':
-                    if i <= 1 and (next_next is None or next_next in DEV_CONSONANTS):
-                        res.append('oo')
-                    else:
-                        res.append('u')
-                else:
-                    res.append(DEV_MATRAS[matra])
-                i += 1
-            elif i == n - 1:
-                if retains_final_a and i >= 2 and chars[i-1] == '्':
-                    res.append(base + 'a')
-                else:
-                    res.append(base)
-            elif next_c in DEV_CONSONANTS:
-                if is_conjunct_member:
-                    res.append(base + 'a')
-                elif i > 0 and (next_next == '्' or (next_next in DEV_MATRAS)):
-                    res.append(base)
-                else:
-                    res.append(base + 'a')
-            else:
-                res.append(base + 'a')
+            if c == 'फ' and (clean.startswith('फतेह') or clean.startswith('फारू') or clean.startswith('फिरो') or clean.startswith('फैज') or clean.startswith('फकी')):
+                base = 'f'
+            i += 1
+            matra = ''
+            if i < n and chars[i] in DEV_MATRAS:
+                matra = chars[i]; i += 1
+            elif i < n and chars[i] == '्':
+                matra = '्'; i += 1
+            units.append({'type': 'CONS', 'char': c, 'base': base, 'matra': matra})
         elif c in DEV_MATRAS:
-            res.append(DEV_MATRAS[c])
+            units.append({'type': 'MATRA', 'char': c, 'base': DEV_MATRAS[c], 'matra': ''})
+            i += 1
         else:
-            res.append(c)
-        i += 1
-    s = ''.join(res)
+            units.append({'type': 'OTHER', 'char': c, 'base': c, 'matra': ''})
+            i += 1
+
+    out = []
+    num_units = len(units)
+    for uIdx in range(num_units):
+        u = units[uIdx]
+        if u['type'] == 'OTHER':
+            out.append(u['base'])
+            continue
+        if u['type'] == 'VOWEL':
+            v_str = u['base'] if not out else u['base'].lower()
+            if u['matra'] in ('ं', 'ँ'):
+                v_str += 'n'
+            out.append(v_str)
+            continue
+        if u['type'] == 'MATRA':
+            out.append(u['base'])
+            continue
+
+        base = u['base']
+        if u['matra'] == '्':
+            out.append(base)
+            continue
+
+        if u['matra']:
+            m_char = u['matra']
+            matra_str = DEV_MATRAS.get(m_char, '')
+            if m_char in ('ं', 'ँ'):
+                next_u = units[uIdx + 1] if uIdx + 1 < num_units else None
+                if next_u and next_u['type'] == 'CONS':
+                    next_c = next_u['char']
+                    if next_c in ['प', 'फ', 'ब', 'भ', 'म', 'फ़']:
+                        matra_str = 'am'
+                    elif next_c in ['क', 'ख', 'ग', 'घ']:
+                        matra_str = 'ang'
+                    else:
+                        matra_str = 'an'
+                else:
+                    matra_str = 'on' if uIdx == num_units - 1 else 'an'
+            out.append(base + matra_str)
+            continue
+
+        is_last = (uIdx == num_units - 1)
+        if is_last:
+            prev_u = units[uIdx - 1] if uIdx > 0 else None
+            is_conjunct_end = prev_u and prev_u.get('matra') == '्'
+            if base in ('dr', 'ndr') or is_conjunct_end:
+                out.append(base + 'a')
+            else:
+                out.append(base)
+            continue
+
+        next_u = units[uIdx + 1]
+        prev_u = units[uIdx - 1] if uIdx > 0 else None
+        delete_schwa = False
+        is_penultimate = (uIdx + 1 == num_units - 1 and not next_u.get('matra'))
+        if is_penultimate:
+            delete_schwa = False
+        elif next_u and next_u['type'] == 'CONS' and next_u['matra'] == '्':
+            delete_schwa = False
+        elif next_u and next_u['type'] == 'CONS' and next_u['matra']:
+            if prev_u and prev_u.get('matra') != '्':
+                delete_schwa = True
+
+        out.append(base if delete_schwa else base + 'a')
+
+    s = ''.join(out)
     return s.capitalize()
 
 def transliterate_hindi(text: str) -> str:
@@ -1308,7 +1597,7 @@ TEMPLATE_HEADERS = [
 def save_templated_voter_excel(voters_list, output_file_path, template_path=None):
     """
     Saves voters matching the official voter-import-template.xlsx structure.
-    Sheet 1: 'Voters' (Exact 18 columns for direct VijaySetu platform import)
+    Sheet 1: 'Voters' (Exact 18 columns for direct MatdataPortal platform import)
     Sheet 2: 'मतदाता सूची' (Styled pure Devanagari electoral roll for verification/printing)
     """
     if not voters_list:
@@ -1319,8 +1608,8 @@ def save_templated_voter_excel(voters_list, output_file_path, template_path=None
     if not template_path:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         candidates = [
-            "/Users/piyush/Documents/moxrathore_projects/vijaysetu/voter-import-template.xlsx",
-            os.path.abspath(os.path.join(script_dir, "../../../..", "voter-import-template.xlsx")),
+            os.path.abspath(os.path.join(script_dir, "../data", "voter-import-template.xlsx")),
+            os.path.abspath(os.path.join(script_dir, "..", "voter-import-template.xlsx")),
             os.path.abspath(os.path.join(script_dir, "voter-import-template.xlsx")),
         ]
         for c in candidates:
@@ -1340,26 +1629,26 @@ def save_templated_voter_excel(voters_list, output_file_path, template_path=None
         ws_voters.title = 'Voters'
         ws_voters.append(TEMPLATE_HEADERS)
 
-    # 1. Fill Sheet 1: Voters (Exact 18 columns, Pure Hindi Data only - English fields blank as requested)
+    # 1. Fill Sheet 1: Voters (Exact 18 columns, populated with verified Hindi & English data)
     for v in voters_list:
         row = [
             v.get('epic') or ('' if v.get('status') != 'विलोपित' else f"VOTER_{v.get('serial', '')}"),
             str(v.get('ward') or ''),
             str(v.get('part') or ''),
             v.get('serial') or '',
-            '',  # Name (English) - kept blank, pure Hindi data only
+            v.get('name_en') or transliterate_hindi(v.get('name_hi') or ''),
             v.get('name_hi') or '',
             v.get('age') or 30,
             v.get('gender') or 'पुरुष',
             v.get('relation') or 'पिता',
-            '',  # Relative Name (English) - kept blank
+            v.get('relative_name_en') or transliterate_hindi(v.get('relative_name_hi') or ''),
             v.get('relative_name_hi') or '',
             str(v.get('house_no') or '-'),
             str(v.get('house_no') or '-'),
             v.get('mobile') or '',
             v.get('caste') or '',
             v.get('family_id') or '',
-            '',  # Village (English) - kept blank
+            v.get('village_en') or transliterate_hindi(v.get('village_hi') or ''),
             v.get('village_hi') or ''
         ]
         ws_voters.append(row)
@@ -1473,6 +1762,7 @@ if __name__ == "__main__":
     parser.add_argument("--ward", default=None, help="Override ward number")
     parser.add_argument("--part", "--booth", dest="part", default=None, help="Override part or booth number")
     parser.add_argument("--include-deleted", action="store_true", help="Include deleted (विलोपित) voters in export (default: False)")
+    parser.add_argument("--extract-photos-dir", default=None, help="Directory to save extracted voter photos")
     args = parser.parse_args()
 
     # Determine target input
@@ -1497,7 +1787,7 @@ if __name__ == "__main__":
             out_path = os.path.join(os.path.dirname(pdf_file), f"{stem}.xlsx")
 
         print(f"\nProcessing Single PDF: {bn} ...")
-        rows = extract_single_pdf(pdf_file, default_ward=args.ward, default_part=args.part, include_deleted=args.include_deleted)
+        rows = extract_single_pdf(pdf_file, default_ward=args.ward, default_part=args.part, include_deleted=args.include_deleted, photos_dir=args.extract_photos_dir)
         save_templated_voter_excel(rows, out_path, template_path=args.template)
         learned_g, learned_w = load_learned_dictionary()
         print(json.dumps({

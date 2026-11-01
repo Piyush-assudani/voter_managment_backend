@@ -8,7 +8,6 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 const express = require('express');
-const cors = require('cors');
 const dotenv = require('dotenv');
 const helmet = require('helmet'); // Security Headers & CSP
 let compression = null;
@@ -38,40 +37,50 @@ const PORT = process.env.PORT || 5002;
 // High-Throughput Rate Limiters
 const rateLimit = require('express-rate-limit');
 
-// 1. General API Rate Limiter (1200 req/min - generous headroom for multiple ground workers sharing mobile hotspot)
+// 1. General API Rate Limiter (2500 req/min - high headroom for ground workers sharing same hotspot)
 const apiLimiter = rateLimit({
   windowMs: 1 * 60 * 1000,
-  max: 1200,
+  max: 2500,
   message: { message: 'Too many requests from this IP, please try again after a minute' },
   standardHeaders: true,
   legacyHeaders: false,
   validate: { trustProxy: false },
-  skip: (req) => req.method === 'OPTIONS' || req.path === '/health' || req.path === '/api/health',
 });
 
 // 2. Strict Authentication Rate Limiter (Prevents brute force on login)
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes window
-  max: 60, // 60 attempts per 15 min per IP
+  max: 40, // 40 attempts per 15 min per IP
   message: { message: 'बहुत अधिक लॉगिन प्रयास (Too many login attempts). कृपया 15 मिनट बाद पुनः प्रयास करें।' },
   standardHeaders: true,
   legacyHeaders: false,
   validate: { trustProxy: false },
-  skip: (req) => req.method === 'OPTIONS',
 });
 
-// 3. Upload Rate Limiter (Prevents server exhaustion from spam uploads)
+// 3. Upload Rate Limiter (Allows batch sequential uploads while protecting from flood attacks)
 const uploadLimiter = rateLimit({
   windowMs: 1 * 60 * 1000,
-  max: 30,
+  max: 120, // Allows up to 120 files per minute for sequential multi-PDF uploads
   message: { error: 'फाइल अपलोड की सीमा पार हो गई है। कृपया 1 मिनट बाद पुनः प्रयास करें।' },
   standardHeaders: true,
   legacyHeaders: false,
   validate: { trustProxy: false },
-  skip: (req) => req.method === 'OPTIONS',
 });
 
 const path = require('path');
+
+// Universal Open CORS Middleware (Zero CORS blocking on any route, method, origin, or custom headers)
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+  res.header('Access-Control-Allow-Headers', '*');
+  res.header('Access-Control-Expose-Headers', '*');
+  res.header('Access-Control-Max-Age', '86400'); // Cache preflight for 24 hours to reduce server load
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  next();
+});
 
 // Security & Performance Middlewares
 app.use(helmet({
@@ -79,20 +88,10 @@ app.use(helmet({
   crossOriginOpenerPolicy: false,
 }));
 
-// CORS Configuration: Open, ultra-permissive and cached (Vercel, Android WebView, Capacitor, Localhost never get blocked)
-const corsMiddleware = cors({
-  origin: true,
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-organization-id', 'x-client-id', 'x-requested-with', 'Accept'],
-  maxAge: 86400, // Cache preflight requests for 24h to eliminate duplicate OPTIONS calls
-});
-app.use(corsMiddleware);
-
 // High-speed payload compression (shrinks JSON payloads by up to 90% when module is available)
 if (compression) {
   app.use(compression({
-    threshold: 1024,
+    threshold: 1024, // compress responses above 1KB
     filter: (req, res) => {
       if (req.headers['x-no-compression']) return false;
       return compression.filter(req, res);
@@ -109,10 +108,49 @@ app.use(sanitizeInput);
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use(express.static(path.join(__dirname, 'public')));
 
-app.get('/privacy.html', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'privacy.html')));
-app.get('/privacy', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'privacy.html')));
-app.get('/terms.html', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'terms.html')));
-app.get('/terms', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'terms.html')));
+// Health checks placed before rate limiters so monitoring probes never get rate limited
+app.get(['/health', '/api/health'], async (_req, res) => {
+  try {
+    const mongoose = require('mongoose');
+    if (mongoose.connection.readyState === 1) {
+      res.json({ status: 'ok', database: 'connected', timestamp: new Date().toISOString() });
+    } else {
+      res.status(503).json({ status: 'degraded', database: 'unavailable' });
+    }
+  } catch (err) {
+    console.error('Health check failed:', err.message);
+    res.status(503).json({ status: 'degraded', database: 'error' });
+  }
+});
+
+app.get(['/privacy', '/privacy.html'], (_req, res) => res.sendFile(path.join(__dirname, 'public', 'privacy.html')));
+app.get(['/terms', '/terms.html'], (_req, res) => res.sendFile(path.join(__dirname, 'public', 'terms.html')));
+app.get(['/refund', '/refund.html'], (_req, res) => res.sendFile(path.join(__dirname, 'public', 'refund.html')));
+app.get(['/contact', '/contact.html'], (_req, res) => res.sendFile(path.join(__dirname, 'public', 'contact.html')));
+
+app.get('/api/legal/policies', (_req, res) => {
+  const host = _req.get('host') || 'localhost:5003';
+  const proto = _req.protocol || 'http';
+  res.json({
+    platform: 'Chunav Ranniti (चुनाव रणनीति)',
+    version: '2026.1',
+    effectiveDate: '2026-01-01',
+    lastUpdated: new Date().toISOString(),
+    policies: {
+      privacy: { title: 'Privacy Policy (गोपनीयता नीति)', path: '/privacy.html', url: `${proto}://${host}/privacy.html` },
+      terms: { title: 'Terms of Service (नियम और शर्तें)', path: '/terms.html', url: `${proto}://${host}/terms.html` },
+      refund: { title: 'Refund Policy (धनवापसी नीति)', path: '/refund.html', url: `${proto}://${host}/refund.html` },
+      contact: { title: 'Contact & Grievance (संपर्क एवं शिकायत)', path: '/contact.html', url: `${proto}://${host}/contact.html` }
+    },
+    compliance: {
+      eciGuidelinesCompliant: true,
+      itAct2000Compliant: true,
+      dpdpAct2023Compliant: true,
+      metaWhatsAppCloudApiCompliant: true,
+      commercialDataSaleProhibited: true
+    }
+  });
+});
 
 // Apply rate limiter to all API routes
 app.use('/api', apiLimiter);
@@ -139,22 +177,8 @@ app.use('/api/users', userRoutes);
 app.use('/api/features', featureRoutes.router);
 app.use('/api/admin/pdf', require('./routes/admin_pdf'));
 
-app.get('/api/health', async (_req, res) => {
-  try {
-    const mongoose = require('mongoose');
-    if (mongoose.connection.readyState === 1) {
-      res.json({ status: 'ok', database: 'connected', timestamp: new Date().toISOString() });
-    } else {
-      res.status(503).json({ status: 'degraded', database: 'unavailable' });
-    }
-  } catch (err) {
-    console.error('Health check failed:', err.message);
-    res.status(503).json({ status: 'degraded', database: 'error' });
-  }
-});
-
 app.get('/', (req, res) => {
-  res.send('VijaySetu Backend API is running.');
+  res.send('VijaySetu Electoral Intelligence Backend API is running.');
 });
 
 // Graceful Safe Error Handling (Never leaks stack traces, DB credentials, or internal paths)

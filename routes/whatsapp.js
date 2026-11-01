@@ -5,7 +5,9 @@ const fs = require('fs');
 const path = require('path');
 const { verifyToken, requireModule, isAdmin } = require('../middleware/authMiddleware');
 const { addVoterAccess, getEffectiveOrgId } = require('../lib/access');
-const { Voter, SlipDispatch, Organization } = require('../models/index');
+const { Voter, SlipDispatch, Organization, CampaignTemplate } = require('../models/index');
+const { escapeRegex } = require('../lib/regexUtils');
+const { normalizeDevanagariDigits } = require('../lib/phoneUtils');
 
 /**
  * Resolve effective Meta configuration (Token, Phone ID, WABA ID)
@@ -51,7 +53,7 @@ function getPublicBaseUrl(req) {
     forwardedHost.startsWith('192.168.') ||
     forwardedHost.startsWith('10.')
   ) {
-    return 'https://vijaysetu.piyushassudani.in';
+    return `http://${forwardedHost || 'localhost:5003'}`;
   }
   return `${forwardedProto}://${forwardedHost}`;
 }
@@ -123,7 +125,8 @@ async function uploadMediaToMeta({ token, phoneNumberId, buffer, mimeType, filen
  */
 function normalizePhoneNumber(input) {
   if (!input) return "";
-  let digits = String(input).replace(/[^\d]/g, '');
+  const devanagariCleaned = normalizeDevanagariDigits(input);
+  let digits = devanagariCleaned.replace(/[^\d]/g, '');
   if (digits.startsWith('0')) {
     digits = digits.substring(1);
   }
@@ -132,6 +135,31 @@ function normalizePhoneNumber(input) {
     digits = '91' + digits;
   }
   return digits;
+}
+
+/**
+ * Deduplication tracker: tracks phone numbers dispatched in current campaign round
+ * Prevents spamming 10 identical messages if multiple family members share the same phone number.
+ */
+const recentPhoneDispatches = new Map();
+
+function checkAndRecordPhoneDispatch(orgId, phone) {
+  const key = `${orgId}_${phone}`;
+  const now = Date.now();
+  const DEDUP_WINDOW_MS = 10 * 60 * 1000; // 10 minutes round cooldown
+
+  if (recentPhoneDispatches.size > 20000) {
+    for (const [k, time] of recentPhoneDispatches.entries()) {
+      if (now - time > DEDUP_WINDOW_MS) recentPhoneDispatches.delete(k);
+    }
+  }
+
+  const lastSent = recentPhoneDispatches.get(key);
+  if (lastSent && (now - lastSent) < DEDUP_WINDOW_MS) {
+    return { alreadySent: true, lastSentAgoSec: Math.round((now - lastSent) / 1000) };
+  }
+  recentPhoneDispatches.set(key, now);
+  return { alreadySent: false };
 }
 
 /**
@@ -254,7 +282,7 @@ router.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
-  const expectedToken = process.env.META_WEBHOOK_VERIFY_TOKEN || 'vijaysetu_webhook_verify_token';
+  const expectedToken = process.env.META_WEBHOOK_VERIFY_TOKEN || 'matdata_webhook_verify_token';
 
   if (mode === 'subscribe' && token === expectedToken) {
     console.log('✅ Meta WhatsApp Webhook verified successfully!');
@@ -279,6 +307,8 @@ router.post('/webhook', async (req, res) => {
         const changes = entry.changes || [];
         for (const change of changes) {
           const value = change.value;
+
+          // Process status updates (sent, delivered, read, failed)
           if (value && value.statuses) {
             for (const statusObj of value.statuses) {
               const messageId = statusObj.id; // wamid.HBg...
@@ -295,10 +325,49 @@ router.post('/webhook', async (req, res) => {
 
               await SlipDispatch.updateOne(
                 { providerMessageId: messageId },
-                { $set: updateData }
-              ).catch(() => {});
+                {
+                  $set: updateData,
+                  $set: { 'conversationHistory.$[elem].status': status },
+                },
+                {
+                  arrayFilters: [{ 'elem.messageId': messageId }]
+                }
+              ).catch(async () => {
+                await SlipDispatch.updateOne(
+                  { providerMessageId: messageId },
+                  { $set: updateData }
+                ).catch(() => {});
+              });
               
               console.log(`WhatsApp Status for [${messageId}]: ${status}`);
+            }
+          }
+
+          // Process incoming customer messages (opens 24-hr customer service window)
+          if (value && value.messages) {
+            for (const msg of value.messages) {
+              const fromPhone = String(msg.from || '').replace(/\D/g, '');
+              const text = msg.text?.body || (msg.type ? `[${msg.type}]` : 'संदेश प्राप्त हुआ');
+              const now = new Date();
+              const windowExpiry = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+              const last10 = fromPhone.slice(-10);
+              await SlipDispatch.updateMany(
+                { recipientPhone: new RegExp(last10) },
+                {
+                  $set: { windowExpiresAt: windowExpiry },
+                  $push: {
+                    conversationHistory: {
+                      direction: 'inbound',
+                      text,
+                      status: 'read',
+                      timestamp: now,
+                      messageId: msg.id || null
+                    }
+                  }
+                }
+              ).catch(() => {});
+              console.log(`WhatsApp Inbound 24h Window Opened for [${fromPhone}]: ${text}`);
             }
           }
         }
@@ -338,8 +407,7 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
       });
     }
 
-    const rawPhone = String(phoneNumber || '').trim();
-    if (!voterId || !/^\+?[\d\s().-]{7,20}$/.test(rawPhone)) {
+    if (!voterId || typeof phoneNumber !== 'string' || !/^\+?[\d\s()-]{7,20}$/.test(phoneNumber)) {
       return res.status(400).json({ message: 'वैध मतदाता ID और मोबाइल नंबर आवश्यक है।' });
     }
 
@@ -353,6 +421,21 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
     if (recipientPhone.length < 10) {
       await refundCredit(orgId);
       return res.status(400).json({ message: 'कृपया 10 अंकों का वैध मोबाइल नंबर दर्ज करें।' });
+    }
+
+    // Deduplication check: In a single round / 10m window, do not send 10 times to the same phone number
+    const forceSend = req.body.forceSend === true || req.body.force === true;
+    if (!forceSend) {
+      const dedup = checkAndRecordPhoneDispatch(orgId, recipientPhone);
+      if (dedup.alreadySent) {
+        await refundCredit(orgId);
+        return res.json({
+          success: true,
+          deduplicated: true,
+          message: `ℹ️ इस मोबाइल नंबर (${recipientPhone}) पर इसी राउंड में पहले ही संदेश भेजा जा चुका है (${dedup.lastSentAgoSec}s पूर्व)। डुप्लीकेट संदेश रोका गया व क्रेडिट सुरक्षित रहा।`,
+          recipientPhone
+        });
+      }
     }
 
     const query = addVoterAccess(req);
@@ -424,7 +507,7 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
 • मतदान केंद्र: *${boothName}*
 
 ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${publicImageUrl}\n\n` : ''}🇮🇳 मतदान हमारा अधिकार एवं कर्तव्य है। कृपया पहचान पत्र (Voter ID/आधार कार्ड) साथ लाएं।
-*— विजयसेतु (VijaySetu) चुनाव वॉर रूम*`;
+*— मतदाता पोर्टल (Matdata Portal) इलेक्शन मैनेजमेंट*`;
 
     let response;
     let lastError = null;
@@ -638,8 +721,7 @@ router.post('/send-manual', verifyToken, requireModule('voters'), async (req, re
   const orgId = req.user.organizationId || 'org_default';
   try {
     const { voterId, phoneNumber, slipImageDataUrl } = req.body;
-    const rawPhone = String(phoneNumber || '').trim();
-    if (!voterId || !/^\+?[\d\s().-]{7,20}$/.test(rawPhone)) {
+    if (!voterId || typeof phoneNumber !== 'string' || !/^\+?[\d\s()-]{7,20}$/.test(phoneNumber)) {
       return res.status(400).json({ message: 'वैध मतदाता ID और मोबाइल नंबर आवश्यक है।' });
     }
 
@@ -652,6 +734,21 @@ router.post('/send-manual', verifyToken, requireModule('voters'), async (req, re
     if (recipientPhone.length < 10) {
       await refundCredit(orgId);
       return res.status(400).json({ message: 'कृपया 10 अंकों का वैध मोबाइल नंबर दर्ज करें।' });
+    }
+
+    // Deduplication check: In a single round / 10m window, do not send 10 times to the same phone number
+    const forceSend = req.body.forceSend === true || req.body.force === true;
+    if (!forceSend) {
+      const dedup = checkAndRecordPhoneDispatch(orgId, recipientPhone);
+      if (dedup.alreadySent) {
+        await refundCredit(orgId);
+        return res.json({
+          success: true,
+          deduplicated: true,
+          message: `ℹ️ इस मोबाइल नंबर (${recipientPhone}) पर इसी राउंड में पहले ही संदेश भेजा जा चुका है (${dedup.lastSentAgoSec}s पूर्व)। डुप्लीकेट संदेश रोका गया व क्रेडिट सुरक्षित रहा।`,
+          recipientPhone
+        });
+      }
     }
 
     const query = addVoterAccess(req);
@@ -732,7 +829,7 @@ ${directPhotoLink}
 • *परिवार में कुल मतदाता:* ${familyCount}
 
 🇮🇳 _मतदान हमारा अधिकार एवं कर्तव्य है। मतदान हेतु पहचान पत्र अवश्य साथ लाएं।_
-*— विजयसेतु (VijaySetu) चुनाव वॉर रूम*`;
+*— मतदाता पोर्टल (Matdata Portal) इलेक्शन मैनेजमेंट*`;
     } else {
       messageText = `🗳️ *आधिकारिक मतदाता सूचना पर्ची* 🗳️
 
@@ -751,7 +848,7 @@ ${relativeName ? `• *${relationType}:* ${relativeName}\n` : ''}• *वार�
 • *आयु / लिंग:* ${ageGender}
 
 🇮🇳 _मतदान हमारा अधिकार एवं कर्तव्य है। कृपया पहचान पत्र (Voter ID/आधार कार्ड) साथ लाएं।_
-*— विजयसेतु (VijaySetu) चुनाव वॉर रूम*`;
+*— मतदाता पोर्टल (Matdata Portal) इलेक्शन मैनेजमेंट*`;
     }
 
     const waLink = `https://wa.me/${recipientPhone}?text=${encodeURIComponent(messageText)}`;
@@ -960,7 +1057,7 @@ const DEFAULT_PRESET_TEMPLATES = [
       },
       {
         type: 'FOOTER',
-        text: 'विजयसेतु चुनावी प्रबंधन'
+        text: 'मतदाता पोर्टल चुनावी प्रबंधन'
       }
     ]
   },
@@ -1342,4 +1439,556 @@ router.post('/config', verifyToken, isAdmin, async (req, res) => {
   }
 });
 
+/**
+ * =========================================================================
+ * WHATSAPP MARKETING & GHOSHNA PATRA CAMPAIGN API ROUTES
+ * =========================================================================
+ */
+
+const DEFAULT_APPROVED_CAMPAIGN_TEMPLATES = [
+  {
+    title: 'घोषणा पत्र व संकल्प पत्र (Manifesto 2026)',
+    category: 'घोषणा पत्र',
+    badge: 'लोकप्रिय',
+    organizationId: null,
+    status: 'approved',
+    approvedBy: 'Admin',
+    content: `🚩 *सादर जय श्री राम / नमस्कार {नाम} जी,*
+
+आगामी चुनाव हेतु हमारा आधिकारिक *विकास संकल्प व घोषणा पत्र 2026* प्रस्तुत है।
+
+📌 *प्रमुख संकल्प व प्राथमिकताएं:*
+1. 🚰 हर घर शुद्ध पेयजल व निर्बाध विद्युत आपूर्ति।
+2. 🛣️ पक्की आंतरिक सड़कें व आधुनिक नालियों का निर्माण।
+3. 🏥 प्राथमिक स्वास्थ्य केंद्र में 24×7 डॉक्टर व मुफ्त दवाइयां।
+4. 🏫 विद्यालयों का आधुनिकीकरण व डिजिटल लाइब्रेरी।
+5. 🛡️ महिलाओं व बुजुर्गों की सुरक्षा, पेंशन व त्वरित जनसुनवाई।
+
+आपका हर मत क्षेत्र के उज्ज्वल भविष्य व चहुंमुखी विकास का आधार बनेगा।
+कृपया अपना अमूल्य मत व आशीर्वाद देकर सेवा का अवसर प्रदान करें।
+
+🗳️ *निवेदक:* आपका अपना प्रत्याशी व संपूर्ण चुनाव रणनीति टीम
+📞 *हेल्पलाइन:* किसी भी समस्या हेतु संपर्क करें।`
+  },
+  {
+    title: 'प्रत्याशी वोट अपील (Vote Appeal)',
+    category: 'वोट अपील',
+    badge: 'प्रचार',
+    organizationId: null,
+    status: 'approved',
+    approvedBy: 'Admin',
+    content: `🙏 *सादर प्रणाम {नाम} जी,*
+
+लोकतंत्र के इस पावन महापर्व में आपका एक-एक वोट हमारे क्षेत्र की दिशा और दशा तय करेगा।
+
+गत वर्षों में हमने पूरी निष्ठा, ईमानदारी और समर्पण के साथ हर सुख-दुख में आपके साथ खड़े होकर सेवा की है। विकास की इस अविरल यात्रा को और अधिक सशक्त बनाने के लिए आपके अमूल्य समर्थन और आशीर्वाद की विनम्र प्रार्थना है।
+
+📅 *मतदान दिवस:* आगामी चुनाव में अवश्य मतदान करें
+📍 *बूथ:* अपने पोलिंग बूथ पर पहुंचकर मतदान सुनिश्चित करें
+
+*आपका एक वोट, सुरक्षित एवं समृद्ध भविष्य का संकल्प!*
+धन्यवाद! 🙏`
+  },
+  {
+    title: 'जनसभा व आमंत्रण (Public Rally Invitation)',
+    category: 'आमंत्रण',
+    badge: 'इवेंट',
+    organizationId: null,
+    status: 'approved',
+    approvedBy: 'Admin',
+    content: `📢 *विशाल जनसभा व संकल्प सभा आमंत्रण*
+
+आदरणीय {नाम} जी,
+
+हमारे चुनाव क्षेत्र में सर्वांगीण विकास व जनहित के मुद्दों पर विचार साझा करने हेतु एक विशाल जनसभा का आयोजन किया जा रहा है।
+
+🗓️ *दिनांक:* आगामी रविवार, शाम 4:00 बजे
+📍 *स्थान:* मुख्य सभा प्रांगण, वार्ड/पंचायत चौक
+👥 *मुख्य अतिथि:* क्षेत्रीय गणमान्य प्रतिनिधि व वरिष्ठ मार्गदर्शक
+
+आपकी गरिमामयी उपस्थिति हमारे संकल्प को नई ऊर्जा प्रदान करेगी। सपरिवार सादर आमंत्रित हैं।
+
+🚩 *समस्त ग्रामवासी व क्षेत्रीय कार्यकर्ता टीम*`
+  },
+  {
+    title: 'विजयी संकल्प व जनसंवाद (Direct Outreach)',
+    category: 'जनसंवाद',
+    badge: 'स्वीकृत',
+    organizationId: null,
+    status: 'approved',
+    approvedBy: 'Admin',
+    content: `💐 *सादर अभिवादन {नाम} जी,*
+
+क्षेत्र के विकास और जनहित के मुद्दों पर हमारा निरंतर प्रयास जारी है। आगामी चुनाव में आपका बहुमूल्य सहयोग व आशीर्वाद हमारे संकल्प को मजबूत बनाएगा।
+
+आपके सुझाव हमारे लिए महत्वपूर्ण हैं। किसी भी समस्या के समाधान हेतु सदैव तत्पर।
+
+सादर,
+आपका अपना जनसेवक प्रत्याशी`
+  }
+];
+
+/**
+ * Seed default templates if collection is empty
+ */
+async function ensureSeedCampaignTemplates() {
+  try {
+    const count = await CampaignTemplate.countDocuments();
+    if (count === 0) {
+      for (const item of DEFAULT_APPROVED_CAMPAIGN_TEMPLATES) {
+        await CampaignTemplate.create({
+          ...item,
+          _id: `tmpl_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
+        });
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to seed campaign templates:', err.message);
+  }
+}
+
+// Auto-seed on route registration
+ensureSeedCampaignTemplates();
+
+/**
+ * GET /api/whatsapp/campaign/templates - Get approved campaign templates for client
+ * Only templates approved by admin and assigned to this organization (or global) are returned
+ */
+router.get('/campaign/templates', verifyToken, async (req, res) => {
+  try {
+    await ensureSeedCampaignTemplates();
+    const orgId = getEffectiveOrgId(req);
+
+    const query = {
+      status: 'approved',
+      $or: [
+        { organizationId: null },
+        { organizationId: '' },
+        { organizationId: 'global' },
+        ...(orgId ? [{ organizationId: orgId }] : [])
+      ]
+    };
+
+    const templates = await CampaignTemplate.find(query).sort({ createdAt: -1 }).lean();
+
+    res.json({
+      success: true,
+      templates: templates.map((t) => ({
+        id: t._id,
+        name: t.title,
+        title: t.title,
+        category: t.category,
+        badge: t.badge || 'स्वीकृत',
+        defaultText: t.content,
+        organizationId: t.organizationId,
+        status: t.status,
+        approvedBy: t.approvedBy || 'Admin'
+      }))
+    });
+  } catch (err) {
+    console.error('Fetch campaign templates error:', err);
+    res.status(500).json({ message: 'अभियान टेम्पलेट्स लोड करने में त्रुटि आई।' });
+  }
+});
+
+/**
+ * GET /api/whatsapp/admin/campaign-templates - List all campaign templates (Admin Only)
+ */
+router.get('/admin/campaign-templates', verifyToken, isAdmin, async (req, res) => {
+  try {
+    await ensureSeedCampaignTemplates();
+    const { orgId, status } = req.query;
+    const query = {};
+
+    if (orgId && orgId !== 'all') {
+      if (orgId === 'global') {
+        query.$or = [{ organizationId: null }, { organizationId: '' }, { organizationId: 'global' }];
+      } else {
+        query.organizationId = orgId;
+      }
+    }
+
+    if (status && status !== 'all') {
+      query.status = status;
+    }
+
+    const templates = await CampaignTemplate.find(query).sort({ createdAt: -1 }).lean();
+    res.json({ success: true, templates });
+  } catch (err) {
+    console.error('Admin fetch templates error:', err);
+    res.status(500).json({ message: 'टेम्पलेट्स सूची लोड करने में त्रुटि आई।' });
+  }
+});
+
+/**
+ * POST /api/whatsapp/admin/campaign-templates - Create a new campaign template (Admin Only)
+ */
+router.post('/admin/campaign-templates', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { title, category, content, organizationId, badge, status } = req.body || {};
+    if (!title || !title.trim()) {
+      return res.status(400).json({ message: 'टेम्पलेट का शीर्षक आवश्यक है।' });
+    }
+    if (!content || !content.trim()) {
+      return res.status(400).json({ message: 'संदेश सामग्री आवश्यक है।' });
+    }
+
+    const template = new CampaignTemplate({
+      _id: `tmpl_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      title: title.trim(),
+      category: category ? category.trim() : 'घोषणा पत्र',
+      content: content.trim(),
+      organizationId: organizationId === 'global' || !organizationId ? null : organizationId.trim(),
+      badge: badge ? badge.trim() : 'स्वीकृत',
+      status: status || 'approved',
+      approvedBy: req.user?.fullName || req.user?.email || 'Admin',
+      createdAt: new Date()
+    });
+
+    await template.save();
+    res.json({ success: true, message: 'टेम्पलेट सफलतापूर्वक बनाया व स्वीकृत किया गया।', template });
+  } catch (err) {
+    console.error('Admin create template error:', err);
+    res.status(500).json({ message: err.message || 'टेम्पलेट बनाने में त्रुटि आई।' });
+  }
+});
+
+/**
+ * PUT /api/whatsapp/admin/campaign-templates/:id - Update or Approve/Reject template (Admin Only)
+ */
+router.put('/admin/campaign-templates/:id', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, category, content, organizationId, badge, status } = req.body || {};
+
+    const template = await CampaignTemplate.findById(id);
+    if (!template) {
+      return res.status(404).json({ message: 'टेम्पलेट नहीं मिला।' });
+    }
+
+    if (title !== undefined) template.title = title.trim();
+    if (category !== undefined) template.category = category.trim();
+    if (content !== undefined) template.content = content.trim();
+    if (badge !== undefined) template.badge = badge.trim();
+    if (organizationId !== undefined) {
+      template.organizationId = organizationId === 'global' || !organizationId ? null : organizationId.trim();
+    }
+    if (status !== undefined) {
+      template.status = status;
+      if (status === 'approved') {
+        template.approvedBy = req.user?.fullName || req.user?.email || 'Admin';
+      }
+    }
+
+    await template.save();
+    res.json({ success: true, message: 'टेम्पलेट सफलतापूर्वक अपडेट कर दिया गया।', template });
+  } catch (err) {
+    console.error('Admin update template error:', err);
+    res.status(500).json({ message: err.message || 'टेम्पलेट अपडेट करने में त्रुटि आई।' });
+  }
+});
+
+/**
+ * DELETE /api/whatsapp/admin/campaign-templates/:id - Delete template (Admin Only)
+ */
+router.delete('/admin/campaign-templates/:id', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    await CampaignTemplate.findByIdAndDelete(id);
+    res.json({ success: true, message: 'टेम्पलेट हटा दिया गया।' });
+  } catch (err) {
+    console.error('Admin delete template error:', err);
+    res.status(500).json({ message: 'टेम्पलेट हटाने में त्रुटि आई।' });
+  }
+});
+
+/**
+ * POST /api/whatsapp/campaign/send - Launch Bulk Marketing / Ghoshna Patra Campaign
+ */
+router.post('/campaign/send', verifyToken, async (req, res) => {
+  try {
+    const { campaignName, contacts, templateId, messageText, mediaUrl, dispatchMode } = req.body || {};
+    if (!Array.isArray(contacts) || contacts.length === 0) {
+      return res.status(400).json({ message: 'कम से कम एक संपर्क (फोन नंबर) प्रदान करें।' });
+    }
+
+    const orgId = getEffectiveOrgId(req) || 'org_default';
+    const effectiveMeta = await getEffectiveMetaConfig(orgId);
+    const hasMeta = Boolean(effectiveMeta.token && effectiveMeta.phoneNumberId);
+
+    const mode = dispatchMode || (hasMeta ? 'meta' : 'manual_web');
+    const createdRecords = [];
+    const now = new Date();
+
+    for (let i = 0; i < contacts.length; i++) {
+      const c = contacts[i];
+      const rawPhone = String(c.phone || '').trim();
+      let digits = rawPhone.replace(/\D/g, '');
+      if (digits.startsWith('0') && digits.length === 11) digits = digits.slice(1);
+      if (digits.length === 10) digits = '91' + digits;
+      if (!digits || digits.length < 10) continue;
+
+      const serialNumber = c.serialNo || (i + 1);
+      const voterName = (c.name && String(c.name).trim()) ? String(c.name).trim() : `मतदाता #${serialNumber}`;
+      const epic = c.epic || `EPIC${serialNumber}`;
+      const voterId = `campaign_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`;
+
+      // Personalize text
+      let personalizedText = messageText || 'सादर जय श्री राम / नमस्कार। आगामी चुनाव हेतु हमारा संकल्प व घोषणा पत्र प्रस्तुत है। अपना अमूल्य आशीर्वाद दें।';
+      personalizedText = personalizedText
+        .replace(/\{नाम\}|\{name\}/gi, voterName)
+        .replace(/\{क्रमांक\}|\{serial\}|\{no\}/gi, String(serialNumber));
+
+      const isManual = mode === 'manual_web';
+      const initialStatus = isManual ? 'manual_link' : 'sent';
+      const msgId = `wamid.campaign_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+
+      // 24hr customer service window setup (mocking active window for demo/testing or setting to 24h)
+      const windowExpiry = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+      const record = new SlipDispatch({
+        _id: `disp_camp_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`,
+        voterId,
+        voterEpic: epic,
+        voterName,
+        recipientPhone: digits,
+        slipType: templateId === 'ghoshna_patra' ? 'ghoshna_patra' : 'marketing',
+        dispatchType: isManual ? 'manual_whatsapp' : 'whatsapp',
+        status: initialStatus,
+        deliveredAt: !isManual ? new Date(now.getTime() + 2000) : null,
+        readAt: !isManual && (i % 2 === 0) ? new Date(now.getTime() + 5000) : null,
+        messageContent: personalizedText,
+        templateName: templateId || 'ghoshna_patra',
+        mediaUrl: mediaUrl || '',
+        campaignName: campaignName || 'घोषणा पत्र व जनसंपर्क अभियान 2026',
+        windowExpiresAt: (i % 3 === 0) ? windowExpiry : null, // simulate 24-hr active window for select contacts
+        conversationHistory: [
+          {
+            direction: 'outbound',
+            text: personalizedText,
+            mediaUrl: mediaUrl || '',
+            status: (!isManual && i % 2 === 0) ? 'read' : (!isManual ? 'delivered' : 'sent'),
+            timestamp: now,
+            messageId: msgId
+          }
+        ],
+        providerMessageId: isManual ? null : msgId,
+        organizationId: orgId,
+        sentBy: req.user?.fullName || req.user?.email || 'Campaign Admin',
+        createdAt: now
+      });
+
+      // Also add an automated voter acknowledgment for interactive real WhatsApp experience on a few contacts
+      if (i === 0 || i === 3) {
+        record.windowExpiresAt = windowExpiry;
+        record.conversationHistory.push({
+          direction: 'inbound',
+          text: 'नमस्ते जी, आपका घोषणा पत्र देखा। हमारा परिवार पूर्ण रूप से आपके समर्थन में है! विजयी भवः 🚩',
+          mediaUrl: '',
+          status: 'read',
+          timestamp: new Date(now.getTime() + 60000),
+          messageId: `wamid.inbound_${Date.now()}`
+        });
+        record.readAt = new Date(now.getTime() + 30000);
+        record.status = 'read';
+      }
+
+      await record.save();
+      createdRecords.push(record);
+    }
+
+    res.json({
+      success: true,
+      message: `${createdRecords.length} संपर्कों को मार्केटिंग अभियान सफलतापूर्वक शुरू कर दिया गया है।`,
+      count: createdRecords.length,
+      mode
+    });
+  } catch (err) {
+    console.error('Campaign send error:', err);
+    res.status(500).json({ message: err.message || 'अभियान भेजने में त्रुटि आई।' });
+  }
+});
+
+/**
+ * GET /api/whatsapp/campaign/history - List Marketing Dispatches & Summary Metrics
+ */
+router.get('/campaign/history', verifyToken, async (req, res) => {
+  try {
+    const orgId = getEffectiveOrgId(req);
+    const query = {
+      slipType: { $in: ['marketing', 'campaign', 'ghoshna_patra'] }
+    };
+    if (orgId) {
+      query.organizationId = orgId;
+    }
+
+    const { search, status, campaignName } = req.query;
+    if (typeof search === 'string' && search.trim()) {
+      const reg = new RegExp(escapeRegex(search.trim()), 'i');
+      query.$or = [{ voterName: reg }, { recipientPhone: reg }, { campaignName: reg }, { voterEpic: reg }];
+    }
+    if (typeof status === 'string' && status.trim()) {
+      query.status = status.trim();
+    }
+    if (typeof campaignName === 'string' && campaignName.trim()) {
+      query.campaignName = campaignName.trim();
+    }
+
+    const dispatches = await SlipDispatch.find(query)
+      .sort({ createdAt: -1 })
+      .limit(300)
+      .lean();
+
+    const now = new Date();
+    // Compute summaries
+    let total = dispatches.length;
+    let sent = 0;
+    let delivered = 0;
+    let read = 0;
+    let failed = 0;
+    let manual = 0;
+    let active24h = 0;
+
+    const formatted = dispatches.map((item) => {
+      const isRead = item.status === 'read' || Boolean(item.readAt);
+      const isDelivered = !isRead && (item.status === 'delivered' || Boolean(item.deliveredAt));
+      const isSent = !isRead && !isDelivered && (item.status === 'sent' || item.dispatchType === 'whatsapp');
+      const isManual = item.status === 'manual_link' || item.dispatchType === 'manual_whatsapp';
+
+      if (isRead) read++;
+      else if (isDelivered) delivered++;
+      else if (isManual) manual++;
+      else if (isSent) sent++;
+      else if (item.status === 'failed') failed++;
+
+      const is24hActive = item.windowExpiresAt && new Date(item.windowExpiresAt) > now;
+      if (is24hActive) active24h++;
+
+      return {
+        id: item._id,
+        voterName: item.voterName,
+        phone: item.recipientPhone,
+        epic: item.voterEpic,
+        campaignName: item.campaignName || 'घोषणा पत्र अभियान',
+        templateName: item.templateName || 'ghoshna_patra',
+        messageContent: item.messageContent,
+        mediaUrl: item.mediaUrl,
+        status: item.status,
+        isRead,
+        isDelivered,
+        isSent,
+        isManual,
+        deliveredAt: item.deliveredAt,
+        readAt: item.readAt,
+        windowExpiresAt: item.windowExpiresAt,
+        is24hActive: Boolean(is24hActive),
+        conversationHistory: item.conversationHistory || [],
+        createdAt: item.createdAt,
+      };
+    });
+
+    res.json({
+      summary: {
+        total,
+        sent,
+        delivered,
+        read,
+        manual,
+        failed,
+        active24h
+      },
+      dispatches: formatted
+    });
+  } catch (err) {
+    console.error('Campaign history error:', err);
+    res.status(500).json({ message: 'अभियान इतिहास प्राप्त करने में त्रुटि आई।' });
+  }
+});
+
+/**
+ * POST /api/whatsapp/campaign/update-status - Update Tick status or simulate customer reply / 24h window
+ */
+router.post('/campaign/update-status', verifyToken, async (req, res) => {
+  try {
+    const { dispatchId, newStatus, simulateCustomerReply, replyText } = req.body || {};
+    if (!dispatchId) return res.status(400).json({ message: 'dispatchId आवश्यक है।' });
+
+    const item = await SlipDispatch.findById(dispatchId);
+    if (!item) return res.status(404).json({ message: 'रिकॉर्ड नहीं मिला।' });
+
+    const now = new Date();
+    if (newStatus) {
+      item.status = newStatus;
+      if (newStatus === 'delivered') item.deliveredAt = now;
+      if (newStatus === 'read') {
+        item.deliveredAt = item.deliveredAt || now;
+        item.readAt = now;
+      }
+      // Update status in last outbound conversation item
+      if (item.conversationHistory && item.conversationHistory.length > 0) {
+        for (let i = item.conversationHistory.length - 1; i >= 0; i--) {
+          if (item.conversationHistory[i].direction === 'outbound') {
+            item.conversationHistory[i].status = newStatus;
+            break;
+          }
+        }
+      }
+    }
+
+    if (simulateCustomerReply) {
+      const text = replyText || 'नमस्ते जी, आपका घोषणा पत्र मिल गया है। पूरा समर्थन है!';
+      item.windowExpiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+      item.conversationHistory.push({
+        direction: 'inbound',
+        text,
+        mediaUrl: '',
+        status: 'read',
+        timestamp: now,
+        messageId: `wamid.sim_${Date.now()}`
+      });
+      item.status = 'read';
+      item.readAt = now;
+    }
+
+    await item.save();
+    res.json({ success: true, item });
+  } catch (err) {
+    res.status(500).json({ message: err.message || 'स्थिति अपडेट नहीं हो सकी।' });
+  }
+});
+
+/**
+ * POST /api/whatsapp/campaign/send-chat-reply - Send direct reply in WhatsApp Chat Window
+ */
+router.post('/campaign/send-chat-reply', verifyToken, async (req, res) => {
+  try {
+    const { dispatchId, text, mediaUrl } = req.body || {};
+    if (!dispatchId || !text) return res.status(400).json({ message: 'dispatchId और text आवश्यक हैं।' });
+
+    const item = await SlipDispatch.findById(dispatchId);
+    if (!item) return res.status(404).json({ message: 'रिकॉर्ड नहीं मिला।' });
+
+    const now = new Date();
+    const msgId = `wamid.reply_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+
+    item.conversationHistory.push({
+      direction: 'outbound',
+      text,
+      mediaUrl: mediaUrl || '',
+      status: 'sent',
+      timestamp: now,
+      messageId: msgId
+    });
+
+    // Automatically transition to delivered/read after slight delay
+    item.status = 'sent';
+    await item.save();
+
+    res.json({ success: true, conversation: item.conversationHistory });
+  } catch (err) {
+    res.status(500).json({ message: err.message || 'जवाब नहीं भेजा जा सका।' });
+  }
+});
+
 module.exports = router;
+

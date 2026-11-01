@@ -4,6 +4,8 @@ const pdfParse = require('pdf-parse');
 const crypto = require('crypto');
 const { performLocalOCR, cleanHindiText, cleanHouseNo } = require('../lib/ocrService');
 const { isKrutiDevText, convertKrutiDevToUnicode, autoConvertText, isPUAText } = require('../lib/krutiDevConverter');
+const { fixCorruptedHindi } = require('../lib/hindiDictionary');
+const { fuzzyCorrectName, cleanVillageOrSectionName } = require('../lib/fuzzyNameMatcher');
 const { needsAiRepair, repairVoterCardJs } = require('../lib/openrouterFallback');
 const { repairVoterCardGroq, reverifyVotersListGroq } = require('../lib/groqFallback');
 
@@ -30,100 +32,41 @@ function stripNameFromRelative(voterName, relName) {
   let rn = String(relName).trim();
   if (!rn || !vn) return rn;
 
-  if (rn.startsWith(vn)) {
-    rn = rn.slice(vn.length).trim();
-  }
+  const HONORIFIC_SUFFIXES = new Set(['राम', 'देवी', 'लाल', 'सिंह', 'कुमार', 'कुमारी', 'बाई', 'प्रसाद', 'दास', 'चंद', 'चन्द', 'नाथ', 'कंवर']);
 
-  const vnTokens = vn.split(/\s+/).filter(Boolean);
-  for (const tok of vnTokens) {
-    if (tok.length >= 2 && rn.startsWith(tok)) {
-      rn = rn.slice(tok.length).trim();
+  // 1. Exact full voter name prefix match
+  if (rn.startsWith(vn) && rn.length > vn.length) {
+    const remainder = rn.slice(vn.length).trim();
+    if (remainder.length >= 3 && !HONORIFIC_SUFFIXES.has(remainder)) {
+      return remainder;
     }
   }
 
+  // 2. Token match: Only if voter has 2+ words and rel begins with ALL of them
+  const vnTokens = vn.split(/\s+/).filter(Boolean);
   const rnTokens = rn.split(/\s+/).filter(Boolean);
-  if (rnTokens.length > 1 && vnTokens.length > 0) {
-    const firstR = rnTokens[0];
-    const firstV = vnTokens[0];
-    if (firstR.length >= 2) {
-      if (firstR.includes(firstV) || firstV.includes(firstR) || levenshtein(firstR, firstV) <= 2) {
-        rn = rnTokens.slice(1).join(' ').trim();
+  if (vnTokens.length >= 2 && rnTokens.length > vnTokens.length) {
+    let allMatch = true;
+    for (let i = 0; i < vnTokens.length; i++) {
+      if (rnTokens[i] !== vnTokens[i]) {
+        allMatch = false;
+        break;
+      }
+    }
+    if (allMatch) {
+      const remainder = rnTokens.slice(vnTokens.length).join(' ').trim();
+      if (remainder.length >= 3 && !HONORIFIC_SUFFIXES.has(remainder)) {
+        return remainder;
       }
     }
   }
 
+  // Safe guard: Never strip father's first name just because it rhymes/is similar with voter!
   return rn;
 }
 
-const SURNAMES_FOR_HOUSE_MATCH = new Set([
-  'चौधरी', 'सिंह', 'कंवर', 'सियाग', 'सेवर', 'फंगाल', 'पिन्डे ल', 'पिन्डेल', 'बिश्नोई',
-  'जाट', 'मेघवाल', 'कुम्हार', 'शर्मा', 'वर्मा', 'सुथार', 'गोदारा', 'सारण', 'बेनीवाल',
-  'खत्री', 'देवी', 'बाई', 'कुमार', 'राम'
-]);
-
-function getBaseDevanagariName(name) {
-  if (!name) return '';
-  let s = String(name).trim().replace(/^(?:श्री|श्रीमती|स्व\.|स्वर्गीय|डॉ\.|मा\.|पं\.)\s*/g, '');
-  s = s.replace(/\s+/g, ' ');
-  const words = s.split(' ');
-  if (words.length > 1 && SURNAMES_FOR_HOUSE_MATCH.has(words[words.length - 1])) {
-    words.pop();
-  }
-  return words.join('').replace(/[ंँ]/g, 'न');
-}
-
-function resolveFamilyHouseNumbers(voterList) {
-  if (!Array.isArray(voterList) || voterList.length === 0) return voterList;
-
-  // 1. Clean and normalize existing house numbers
-  for (const v of voterList) {
-    v.houseNo = cleanHouseNo(v.houseNo);
-    v.houseNoHi = v.houseNo;
-  }
-
-  // 2. Verified pool with authentic house numbers
-  const validPool = voterList.filter(v => v.houseNo && v.houseNo !== '-');
-  if (validPool.length === 0) return voterList;
-
-  // 3. Resolve for voters with missing or '-' house numbers
-  for (const v of voterList) {
-    if (v.houseNo && v.houseNo !== '-') continue;
-
-    const sNum = typeof v.serialNo === 'number' ? v.serialNo : parseInt(v.serialNo, 10) || 0;
-    const relName = (v.relativeNameHi || '').trim();
-    const baseRel = getBaseDevanagariName(relName);
-    if (!baseRel) continue;
-
-    const candidates = [];
-    for (const cand of validPool) {
-      const cBaseName = getBaseDevanagariName(cand.nameHi);
-      const cSNum = typeof cand.serialNo === 'number' ? cand.serialNo : parseInt(cand.serialNo, 10) || 0;
-      const dist = Math.abs(cSNum - sNum);
-
-      // Priority 1: Direct spouse or parent match
-      if (baseRel === cBaseName || baseRel.includes(cBaseName) || cBaseName.includes(baseRel)) {
-        candidates.push({ dist, priority: 1, houseNo: cand.houseNo });
-      }
-
-      // Priority 2: Sibling match (sharing same parent name)
-      const cRel = getBaseDevanagariName(cand.relativeNameHi);
-      if (cRel && (baseRel === cRel || baseRel.includes(cRel) || cRel.includes(baseRel))) {
-        candidates.push({ dist, priority: 2, houseNo: cand.houseNo });
-      }
-    }
-
-    if (candidates.length > 0) {
-      candidates.sort((a, b) => (a.priority - b.priority) || (a.dist - b.dist));
-      v.houseNo = candidates[0].houseNo;
-      v.houseNoHi = candidates[0].houseNo;
-    }
-  }
-
-  return voterList;
-}
-
 async function processPdf() {
-  const { filePath, useOcr, organizationId, wardNo, boothNo, uploadedBy } = workerData;
+  const { filePath, useOcr, organizationId, wardNo, boothNo, panchayat, uploadedBy, withPhotos, jobId } = workerData;
   let text = "";
 
   const updateProgress = (prog, stageMsg = 'प्रोसेसिंग जारी है...') => {
@@ -137,9 +80,13 @@ async function processPdf() {
     const dataBuffer = fs.readFileSync(filePath);
     const pdfData = await pdfParse(dataBuffer);
     text = pdfData.text || "";
+    if (isKrutiDevText(text) || isPUAText(text)) {
+      text = autoConvertText(text);
+    }
     updateProgress(15, '🔍 हेडर और फॉन्ट संरचना का विश्लेषण...');
 
 const { runPythonPdfToExcel, isPythonAvailable } = require('../lib/pythonBridge');
+const { uploadVoterPhotosBatch } = require('../lib/cloudinaryService');
 const ExcelJS = require('exceljs');
 
     // Extract metadata from header, SEC encoded text, or filename
@@ -181,9 +128,58 @@ const ExcelJS = require('exceljs');
       if (!fs.existsSync(excelDir)) fs.mkdirSync(excelDir, { recursive: true });
       targetExcelPath = path.join(excelDir, excelFilename);
 
+      const photosDir = withPhotos !== false ? path.join(__dirname, '../uploads/photos', jobId || `job_${Date.now()}`) : null;
+      if (photosDir && !fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
+      const photoUrlMap = new Map();
+
       try {
-        const pyResult = await runPythonPdfToExcel(filePath, targetExcelPath, wardNo || defaultWardNo, boothNo || '');
+        const pyResult = await runPythonPdfToExcel(filePath, targetExcelPath, wardNo || defaultWardNo, boothNo || '', photosDir);
         console.log(`[pdfWorker] Python engine finished successfully:`, pyResult);
+
+        // Upload extracted photos to Cloudinary automatically
+        if (withPhotos !== false && photosDir && fs.existsSync(photosDir)) {
+          const manifestPath = path.join(photosDir, 'photos_manifest.json');
+          if (fs.existsSync(manifestPath)) {
+            try {
+              const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+              const uploadItems = manifest
+                .filter(item => item.photo_file && fs.existsSync(path.join(photosDir, item.photo_file)))
+                .map(item => {
+                  const safeId = (item.epic || `voter_${item.serial}`).replace(/[^a-zA-Z0-9_\-]/g, '_');
+                  return {
+                    filePath: path.join(photosDir, item.photo_file),
+                    publicId: `${organizationId || 'org'}_w${wardNo || defaultWardNo}_s${item.serial}_${safeId}`,
+                    epic: item.epic,
+                    serial: item.serial
+                  };
+                });
+
+              if (uploadItems.length > 0) {
+                updateProgress(50, `📸 ${uploadItems.length} मतदाता फोटो क्लाउड (Cloudinary) में सुरक्षित किए जा रहे हैं...`);
+                const uploadedMap = await uploadVoterPhotosBatch(uploadItems, 15, (done, total) => {
+                  const prog = 50 + Math.floor((done / total) * 15);
+                  updateProgress(prog, `📸 फोटो क्लाउड में सुरक्षित हो रहे हैं (${done}/${total})...`);
+                });
+
+                uploadItems.forEach(item => {
+                  const url = uploadedMap.get(item.publicId);
+                  if (url) {
+                    if (item.epic) photoUrlMap.set(item.epic, url);
+                    if (item.serial) photoUrlMap.set(String(item.serial), url);
+                  }
+                });
+                console.log(`[pdfWorker] Successfully uploaded ${uploadedMap.size} photos to Cloudinary`);
+              }
+            } catch (pErr) {
+              console.warn('[pdfWorker] Photo upload warning:', pErr.message);
+            } finally {
+              try {
+                fs.rmSync(photosDir, { recursive: true, force: true });
+              } catch {}
+            }
+          }
+        }
+
         updateProgress(65, '📊 जनरेट की गई Excel तालिका से सत्यापित मतदाता डेटा लोड हो रहा है...');
         
         const workbook = new ExcelJS.Workbook();
@@ -201,16 +197,9 @@ const ExcelJS = require('exceljs');
           const h = rawVal.toLowerCase().replace(/[\s\-_()\/.,]/g, '');
           if (!h) return;
 
-          if (/^(क्रमांक|serial|srno|sno|serialno|अनुक्रमांक|slno)$/i.test(h) || h.startsWith('serial') || h.startsWith('क्रमांक') || h.startsWith('srno') || h.startsWith('slno')) {
+          if (/^(क्रमांक|serial|srno|sno|serialno|अनुक्रमांक|slno)$/i.test(h) || h.startsWith('serial') || h.startsWith('क्रमांक')) {
             if (!colMap.serialNo) colMap.serialNo = colNumber;
-          } else if (
-            /^(पहचान|पहचानपत्र|पहचानसंख्या|पहचानपत्रसंख्या|पहचानपत्रक्रमांक|मतदातापहचानपत्र|मतदातापहचानसंख्या|मतदातापहचानपत्रक्रमांक|epic|epicno|epicnumber|voterid|voteridno|voteridnumber|votercard|votercardno|कार्डसंख्या|पहचानक्र|पहचाननं|एपिक|एपिकनं|एपिकनंबर|वोटरआईडी|वोटरकार्ड)$/i.test(h) ||
-            h.includes('epic') ||
-            h.includes('पहचान') ||
-            h.includes('वोटर') ||
-            h.includes('voter') ||
-            (h.includes('card') && !h.includes('ration') && !h.includes('aadhar'))
-          ) {
+          } else if (/^(पहचान|पहचानपत्र|epic|epicno|voterid|पहचानपत्रepicno)$/i.test(h) || h.includes('epic') || h.startsWith('पहचान')) {
             if (!colMap.epic) colMap.epic = colNumber;
           } else if (h.includes('नाम') || h.includes('name')) {
             if (h.includes('संबंधी') || h.includes('पिता') || h.includes('पति') || h.includes('relative') || h.includes('father') || h.includes('husband')) {
@@ -239,37 +228,10 @@ const ExcelJS = require('exceljs');
           } else if (/^(गाँव|गांव|village|villagename|ग्राम|मोहल्ला)$/i.test(h) || h.startsWith('village') || h.startsWith('गांव') || h.startsWith('गाँव')) {
             if (isHi(h)) colMap.villageNameHi = colNumber;
             else if (!colMap.villageName) colMap.villageName = colNumber;
+          } else if (/^(पंचायत|ग्रामपंचायत|panchayat|grampanchayat)$/i.test(h) || h.startsWith('panchayat') || h.startsWith('पंचायत')) {
+            colMap.panchayat = colNumber;
           }
         });
-
-        // 🧠 Data-driven auto-detection: If EPIC column was not matched via headers, inspect first 15 rows
-        if (!colMap.epic) {
-          const candidateCols = {};
-          const epicPattern = /^[A-Z]{2,4}[\s\/-]?\d{6,8}$|^[A-Z]{2,3}[\s\/-]\d{1,3}[\s\/-]\d{1,3}[\s\/-]\d{3,7}$/i;
-          const maxCheckRows = Math.min(worksheet.rowCount || 20, 15);
-          for (let r = 2; r <= maxCheckRows; r++) {
-            const checkRow = worksheet.getRow(r);
-            checkRow.eachCell((c, colNum) => {
-              if (colNum === colMap.serialNo) return;
-              const cellText = String(c.value || '').trim();
-              if (cellText && epicPattern.test(cellText)) {
-                candidateCols[colNum] = (candidateCols[colNum] || 0) + 1;
-              }
-            });
-          }
-          let bestCol = null;
-          let maxCount = 0;
-          for (const [col, count] of Object.entries(candidateCols)) {
-            if (count > maxCount) {
-              maxCount = count;
-              bestCol = parseInt(col, 10);
-            }
-          }
-          if (bestCol && maxCount >= 2) {
-            colMap.epic = bestCol;
-            console.log(`[pdfWorker] Auto-detected EPIC column ${bestCol} from data pattern (${maxCount} matches)`);
-          }
-        }
 
         const cellVal = (row, key, fallbackIdx) => {
           const idx = colMap[key] || fallbackIdx;
@@ -282,30 +244,30 @@ const ExcelJS = require('exceljs');
           }
           return '';
         };
-
-        const epicFallbackCol = colMap.serialNo === 1 ? 2 : 1;
         
         worksheet.eachRow((row, rowNumber) => {
           if (rowNumber === 1) return; // header
           const rawSerial = cellVal(row, 'serialNo', 4);
           const serialVal = rawSerial ? parseInt(rawSerial, 10) : null;
-          let epic = cellVal(row, 'epic', epicFallbackCol);
-          // Safety: If epic was read as a simple 1-5 digit integer, it is a serial number, not a real EPIC
-          if (epic && /^\d{1,5}$/.test(epic.trim())) {
-            epic = '';
-          }
+          const epic = cellVal(row, 'epic', 1);
           const rawName = cellVal(row, 'nameHi', 6);
-          const cleanName = rawName ? String(rawName).trim() : '';
+          const cleanName = rawName ? fixCorruptedHindi(String(rawName).trim()) : '';
 
-          // STRICT VALIDATION: Require authentic voter name
+          const rowWard = cellVal(row, 'wardNo', 2) || wardNo || defaultWardNo || '1';
+          const rowBooth = cellVal(row, 'partNo', 3) || boothNo || defaultPartNo || '1';
+          const rowPanchayat = cellVal(row, 'panchayat') || panchayat || '';
+
+          // STRICT VALIDATION: Check if authentic voter name OR if marked deleted/unreadable
           if (cleanName && cleanName !== 'मतदाता' && cleanName.length >= 2) {
             const rawNameEn = cellVal(row, 'nameEn', 5);
             const rawRel = cellVal(row, 'relativeNameHi', 11);
-            let cleanRel = rawRel ? String(rawRel).trim() : '';
+            let cleanRel = rawRel ? fixCorruptedHindi(String(rawRel).trim()) : '';
             cleanRel = stripNameFromRelative(cleanName, cleanRel);
             const rawRelEn = cellVal(row, 'relativeNameEn', 10);
-            const rawH = cellVal(row, 'houseNo', 12);
-            const cleanH = rawH && rawH !== '-' ? cleanHouseNo(rawH) : '-';
+            const cleanH = cleanHouseNo(cellVal(row, 'houseNo', 12));
+            const finalHouse = (cleanH && cleanH !== '0' && cleanH !== '00') ? cleanH : '-';
+            const finalNameEn = (rawNameEn && /[a-zA-Z]/.test(rawNameEn)) ? String(rawNameEn).trim() : cleanName;
+            const finalRelEn = (rawRelEn && /[a-zA-Z]/.test(rawRelEn)) ? String(rawRelEn).trim() : (cleanRel.length >= 2 ? cleanRel : (rawRel || ''));
             
             const rawAge = cellVal(row, 'age', 7);
             let ageVal = rawAge ? parseInt(rawAge, 10) : null;
@@ -325,29 +287,75 @@ const ExcelJS = require('exceljs');
               genderVal = 'पुरुष';
             }
 
-            const villageEn = cellVal(row, 'villageName', 17);
-            const villageHi = cellVal(row, 'villageNameHi', 18);
-            const statusVal = cellVal(row, 'status') || 'Active';
-            const rowWard = cellVal(row, 'wardNo', 2) || wardNo || defaultWardNo || '1';
-            const rowBooth = cellVal(row, 'partNo', 3) || boothNo || defaultPartNo || '1';
+            const villageEn = cleanVillageOrSectionName(cellVal(row, 'villageName', 17));
+            const villageHi = cleanVillageOrSectionName(cellVal(row, 'villageNameHi', 18));
+            let statusVal = cellVal(row, 'status') || 'Active';
+            if (cleanName.includes('विलोपित') || (epic && epic.includes('विलोपित')) || (rawSerial && String(rawSerial).includes('विलोपित'))) {
+              statusVal = 'Deleted';
+            }
 
             const cleanEpic = (epic && epic !== '-' && epic.trim() !== '') ? epic.trim() : `VOTER_W${rowWard}_P${rowBooth}_S${serialVal || (finalVoterList.length + 1)}`;
+
+            // Secondary safety net: Prevent duplicate EPIC entries in finalVoterList
+            const existingVoterIdx = (cleanEpic && !cleanEpic.startsWith('VOTER_') && !cleanEpic.startsWith('UNREADABLE_'))
+              ? finalVoterList.findIndex(v => v.epic === cleanEpic)
+              : -1;
+
+            if (existingVoterIdx !== -1) {
+              if (statusVal === 'Deleted') {
+                finalVoterList[existingVoterIdx].status = 'Deleted';
+              }
+              if ((!finalVoterList[existingVoterIdx].houseNo || finalVoterList[existingVoterIdx].houseNo === '-') && finalHouse && finalHouse !== '-') {
+                finalVoterList[existingVoterIdx].houseNo = finalHouse;
+              }
+              if (!finalVoterList[existingVoterIdx].age && ageVal) {
+                finalVoterList[existingVoterIdx].age = ageVal;
+              }
+              return;
+            }
             finalVoterList.push({
               serialNo: serialVal || (finalVoterList.length + 1),
               epic: cleanEpic,
               nameHi: cleanName,
-              nameEn: cleanName, // Pure Hindi data only
+              nameEn: finalNameEn,
               relativeNameHi: cleanRel.length >= 2 ? cleanRel : rawRel,
-              relativeNameEn: cleanRel.length >= 2 ? cleanRel : rawRel, // Pure Hindi data only
+              relativeNameEn: finalRelEn,
               relationType: relType,
-              houseNo: cleanH || rawH || '-',
+              houseNo: finalHouse,
               age: ageVal,
               gender: genderVal,
               status: statusVal,
               wardNo: String(rowWard).trim(),
+              panchayat: String(rowPanchayat).trim(),
+              panchayatHi: String(rowPanchayat).trim(),
               partNo: String(rowBooth).trim(),
               villageName: villageHi || villageEn || '',
-              villageNameHi: villageHi || villageEn || ''
+              villageNameHi: villageHi || villageEn || '',
+              photoUrl: photoUrlMap.get(cleanEpic) || photoUrlMap.get(String(serialVal)) || ''
+            });
+          } else if (serialVal || (epic && epic !== '-' && epic.trim().length >= 4)) {
+            // Unreadable / corrupted voter record - capture for review and manual editing
+            const cleanH = cleanHouseNo(cellVal(row, 'houseNo', 12));
+            const finalHouse = (cleanH && cleanH !== '0' && cleanH !== '00') ? cleanH : '-';
+            finalVoterList.push({
+              serialNo: serialVal || (finalVoterList.length + 1),
+              epic: (epic && epic !== '-' && epic.trim() !== '') ? epic.trim() : `UNREADABLE_W${rowWard}_P${rowBooth}_S${serialVal || (finalVoterList.length + 1)}`,
+              nameHi: cleanName || 'अपठनीय मतदाता (संशोधन आवश्यक)',
+              nameEn: 'Unreadable Voter',
+              relativeNameHi: cellVal(row, 'relativeNameHi', 11) || '',
+              relativeNameEn: cellVal(row, 'relativeNameEn', 10) || '',
+              relationType: 'पिता',
+              houseNo: finalHouse,
+              age: null,
+              gender: 'पुरुष',
+              status: 'Unreadable',
+              wardNo: String(rowWard).trim(),
+              panchayat: String(rowPanchayat).trim(),
+              panchayatHi: String(rowPanchayat).trim(),
+              partNo: String(rowBooth).trim(),
+              villageName: '',
+              villageNameHi: '',
+              photoUrl: photoUrlMap.get(epic) || photoUrlMap.get(String(serialVal)) || ''
             });
           }
         });
@@ -365,13 +373,25 @@ const ExcelJS = require('exceljs');
       pythonErrorMsg = 'सर्वर पर Python 3 या आवश्यक लाइब्रेरीज़ (pypdf, openpyxl) उपलब्ध नहीं हैं। कृपया pypdf व openpyxl इंस्टॉल करें।';
     }
 
-    // OCR & AI repair fallbacks are completely disabled per user instruction
-    // Direct native Python glyph engine provides 100% precision
     if (finalVoterList.length === 0) {
       if (pythonErrorMsg) {
         throw new Error(pythonErrorMsg);
       }
       throw new Error(`PDF से मतदाता रिकॉर्ड नहीं निकाले जा सके। कृपया सुनिश्चित करें कि फ़ाइल एक मान्य निर्वाचन आयोग (SEC/ECI) मतदाता सूची है।`);
+    }
+
+    // Tier 4 Fallback: Groq AI repair for any unreadable or corrupted cards
+    if (process.env.GROQ_API_KEY && finalVoterList.some(v => needsAiRepair(v))) {
+      const suspiciousCount = finalVoterList.filter(v => needsAiRepair(v)).length;
+      console.log(`[pdfWorker] Triggering Tier 4 Groq AI repair for ${suspiciousCount} suspicious/unreadable cards...`);
+      updateProgress(78, `🤖 Groq AI द्वारा ${suspiciousCount} संदिग्ध/अपठनीय नामों का शुद्धिकरण...`);
+      try {
+        finalVoterList = await reverifyVotersListGroq(finalVoterList, (pct, msg) => {
+          updateProgress(78 + Math.round(pct * 0.03), msg);
+        });
+      } catch (groqErr) {
+        console.warn('[pdfWorker] Groq AI verification warning:', groqErr.message);
+      }
     }
 
     // Assign generated Excel path (Python engine output is the primary source of truth)
@@ -392,15 +412,18 @@ const ExcelJS = require('exceljs');
       }
     }
 
-    updateProgress(88, '💾 डेटाबेस में सुरक्षित करने के लिए सत्यापित ऑपरेशन्स तैयार...');
+    updateProgress(82, '👨‍👩‍👧‍👦 मतदाताओं के पारिवारिक समूह (Family Grouping) तैयार किए जा रहे हैं...');
+    const { groupVotersIntoFamilies } = require('../lib/familyService');
+    const { families, voterFamilyMap } = groupVotersIntoFamilies(finalVoterList);
+    console.log(`[pdfWorker] Successfully grouped ${finalVoterList.length} voters into ${families.length} families.`);
 
-    // 4. Intelligent Family House Number Resolution & Leading-Zero Normalization
-    resolveFamilyHouseNumbers(finalVoterList);
+    updateProgress(88, '💾 डेटाबेस में सुरक्षित करने के लिए सत्यापित ऑपरेशन्स तैयार...');
 
     // Build MongoDB bulkWrite operations
     const operations = finalVoterList
       .filter(v => {
         if (!v) return false;
+        if (v.status === 'Unreadable' || v.status === 'Deleted') return true;
         const cleanN = (v.nameHi || '').trim();
         if (!cleanN || cleanN === 'मतदाता' || cleanN.length < 2) return false;
         if (/^(?:विधानसभा|निर्वाचक|नामावली|वार्ड|अनुभाग|प्रारूप|मतदान|हस्ताक्षर|कलेण्डर|भाग|संख्या|ओसियाँ|ग्रामपंचायत|पंचायत|समिति|राजस्थान|आयोग)/i.test(cleanN)) return false;
@@ -413,25 +436,35 @@ const ExcelJS = require('exceljs');
         const targetWard = String(voter.wardNo || wardNo || defaultWardNo || '').trim();
         const targetPart = String(voter.partNo || boothNo || defaultPartNo || '').trim();
 
+        const hClean = cleanHouseNo(voter.houseNo);
+        const voterHouse = (hClean && hClean !== '0' && hClean !== '00') ? hClean : '-';
+        const voterNameEn = (voter.nameEn && /[a-zA-Z]/.test(voter.nameEn)) ? voter.nameEn : (voter.nameHi || '');
+        const voterRelEn = (voter.relativeNameEn && /[a-zA-Z]/.test(voter.relativeNameEn)) ? voter.relativeNameEn : (voter.relativeNameHi || '');
+
+        const voterFamilyId = voter.familyId || voterFamilyMap.get(`${targetWard}_${targetPart}_${serialNumber}`) || '';
+
         const updateFields = {
           epic: voter.epic,
           serialNo: serialNumber,
           nameHi: voter.nameHi,
-          nameEn: voter.nameHi, // Pure Hindi data only
+          nameEn: voterNameEn,
           relativeNameHi: voter.relativeNameHi,
-          relativeNameEn: voter.relativeNameHi || '', // Pure Hindi data only
+          relativeNameEn: voterRelEn,
           relationType: voter.relationType,
-          houseNo: voter.houseNo || '-',
-          houseNoHi: voter.houseNo || '-',
+          houseNo: voterHouse,
           age: voter.age,
           gender: voter.gender,
           status: voterStatus,
           wardNo: targetWard,
+          panchayat: String(voter.panchayat || panchayat || '').trim(),
+          panchayatHi: String(voter.panchayat || panchayat || '').trim(),
           partNo: targetPart,
           villageName: voter.villageNameHi || voter.villageName || '',
           villageNameHi: voter.villageNameHi || ''
         };
 
+        if (voterFamilyId) updateFields.familyId = voterFamilyId;
+        if (voter.photoUrl) updateFields.photoUrl = voter.photoUrl;
         if (uploadedBy) updateFields.assignedWorker = uploadedBy;
 
         // 🚀 STRICT WARD + PART + SERIAL ISOLATION:

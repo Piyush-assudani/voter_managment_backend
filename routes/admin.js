@@ -4,7 +4,7 @@ const multer = require('multer');
 const ExcelJS = require('exceljs');
 const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
-const { Organization, User, Voter, Lead } = require('../models/index');
+const { Organization, User, Voter, Lead, SystemSetting, SlipDispatch } = require('../models/index');
 const { verifyToken, isAdmin } = require('../middleware/authMiddleware');
 const { createWorkbook, addSheet, sendWorkbook } = require('../lib/xlsx');
 const cache = require('../lib/cache');
@@ -63,41 +63,57 @@ function stripNameFromRelative(voterName, relName) {
   return rn;
 }
 
+router.get('/diagnose-photo-pipeline', verifyToken, isAdmin, async (_req, res) => {
+  const { execSync } = require('child_process');
+  const path = require('path');
+  const fs = require('fs');
+  const report = {};
+
+  // 1. Python check
+  try {
+    const pyCheck = execSync('python3 -c "import fitz, PIL, pypdf, openpyxl; print(\'ALL_DEPS_OK\')"', { encoding: 'utf-8', timeout: 10000 });
+    report.python = { ok: true, output: pyCheck.trim() };
+  } catch (pyErr) {
+    report.python = { ok: false, error: pyErr.message, stderr: pyErr.stderr?.toString() };
+    // Try installing automatically
+    try {
+      const pipInstall = execSync('python3 -m pip install --no-cache-dir --prefer-binary --break-system-packages PyMuPDF Pillow pypdf openpyxl --no-warn-script-location', { encoding: 'utf-8', timeout: 180000 });
+      report.pipAutoInstall = { attempted: true, success: true, output: pipInstall.trim() };
+    } catch (pipErr) {
+      report.pipAutoInstall = { attempted: true, success: false, error: pipErr.message, stderr: pipErr.stderr?.toString() };
+    }
+  }
+
+  // 2. Cloudinary check
+  try {
+    const { uploadSinglePhoto } = require('../lib/cloudinaryService');
+    const cloudinary = require('cloudinary').v2;
+    const ping = await cloudinary.api.ping();
+    report.cloudinary = { ok: true, ping };
+  } catch (cldErr) {
+    report.cloudinary = { ok: false, error: cldErr.message };
+  }
+
+  // 3. Uploads directory check
+  const uploadDir = path.join(__dirname, '../uploads');
+  report.uploadsDirExists = fs.existsSync(uploadDir);
+
+  res.json(report);
+});
+
 router.get('/organizations', verifyToken, isAdmin, async (_req, res) => {
   try {
     const orgs = await Organization.find({ _id: { $ne: 'org_default' } }).sort({ createdAt: -1 }).lean();
-    const orgIds = orgs.map(o => o._id);
-
-    const [adminCounts, workerCounts, voterCounts, tenantAdmins] = await Promise.all([
-      User.aggregate([
-        { $match: { organizationId: { $in: orgIds }, role: 'tenant_admin' } },
-        { $group: { _id: '$organizationId', count: { $sum: 1 } } }
-      ]),
-      User.aggregate([
-        { $match: { organizationId: { $in: orgIds }, role: 'worker', isActive: true } },
-        { $group: { _id: '$organizationId', count: { $sum: 1 } } }
-      ]),
-      Voter.aggregate([
-        { $match: { organizationId: { $in: orgIds } } },
-        { $group: { _id: '$organizationId', count: { $sum: 1 } } }
-      ]),
-      User.find({ organizationId: { $in: orgIds }, role: 'tenant_admin' }).lean()
-    ]);
-
-    const adminMap = new Map(adminCounts.map(a => [a._id, a.count]));
-    const workerMap = new Map(workerCounts.map(w => [w._id, w.count]));
-    const voterMap = new Map(voterCounts.map(v => [v._id, v.count]));
-    const tenantAdminMap = new Map(tenantAdmins.map(u => [u.organizationId, u]));
-
-    const result = orgs.map((o) => {
-      const adminCount = adminMap.get(o._id) || 0;
-      const activeWorkers = workerMap.get(o._id) || 0;
-      const voterCount = voterMap.get(o._id) || 0;
+    
+    const result = await Promise.all(orgs.map(async (o) => {
+      const adminCount = await User.countDocuments({ organizationId: o._id, role: 'tenant_admin' });
+      const activeWorkers = await User.countDocuments({ organizationId: o._id, role: 'worker', isActive: true });
+      const voterCount = await Voter.countDocuments({ organizationId: o._id });
 
       let adminEmail = o.adminEmail || '';
       let initialPassword = o.initialPassword || o.demoPassword || '';
       if (!adminEmail || !initialPassword) {
-        const adminUser = tenantAdminMap.get(o._id);
+        const adminUser = await User.findOne({ organizationId: o._id, role: 'tenant_admin' }).lean();
         if (adminUser) {
           adminEmail = adminEmail || adminUser.email || '';
           initialPassword = initialPassword || adminUser.initialPassword || adminUser.demoPassword || '';
@@ -117,9 +133,8 @@ router.get('/organizations', verifyToken, isAdmin, async (_req, res) => {
         district: o.district || '',
         ulbPanchayatSamiti: o.ulbPanchayatSamiti || '',
         ulbWardGramPanchayat: o.ulbWardGramPanchayat || '',
-        customCastes: o.customCastes || o.settings?.customCastes || [],
       };
-    });
+    }));
     
     res.json(result);
   } catch (err) {
@@ -167,17 +182,6 @@ router.post('/organizations', verifyToken, isAdmin, async (req, res) => {
   const isWpEnabled = typeof req.body.whatsappEnabled === 'boolean' ? req.body.whatsappEnabled : true;
   const slipConfig = req.body.slipConfig && typeof req.body.slipConfig === 'object' ? req.body.slipConfig : {};
 
-  let session = null;
-  let inTransaction = false;
-  try {
-    session = await mongoose.startSession();
-    session.startTransaction();
-    inTransaction = true;
-  } catch {
-    session = null;
-    inTransaction = false;
-  }
-
   try {
     const passwordHash = await bcrypt.hash(password, 10);
     const orgPayload = {
@@ -206,18 +210,13 @@ router.post('/organizations', verifyToken, isAdmin, async (req, res) => {
       organizationId: id,
     };
 
-    if (inTransaction && session) {
-      await Organization.create([orgPayload], { session });
-      await User.create([userPayload], { session });
-      await session.commitTransaction();
-    } else {
-      await Organization.create(orgPayload);
-      try {
-        await User.create(userPayload);
-      } catch (userErr) {
-        await Organization.deleteOne({ _id: id });
-        throw userErr;
-      }
+    // Resilient creation: works seamlessly on replica sets, standalone, Atlas and in-memory DBs
+    await Organization.create(orgPayload);
+    try {
+      await User.create(userPayload);
+    } catch (userErr) {
+      await Organization.deleteOne({ _id: id }).catch(() => {});
+      throw userErr;
     }
 
     res.status(201).json({
@@ -237,18 +236,11 @@ router.post('/organizations', verifyToken, isAdmin, async (req, res) => {
       },
     });
   } catch (err) {
-    if (inTransaction && session) {
-      try { await session.abortTransaction(); } catch { /* ignore */ }
-    }
     if (err.code === 11000) {
       return res.status(409).json({ message: `इस एडमिन ईमेल (${sanitizedEmail}) पर पहले से खाता मौजूद है।` });
     }
     console.error('Organization creation failed:', err.message);
     res.status(500).json({ message: `क्लाइंट खाता नहीं बन सका: ${err.message}` });
-  } finally {
-    if (session) {
-      try { session.endSession(); } catch { /* ignore */ }
-    }
   }
 });
 
@@ -297,69 +289,14 @@ router.put('/organizations/:id', verifyToken, isAdmin, async (req, res) => {
     if (req.body.settings && typeof req.body.settings === 'object') {
       updatePayload.settings = req.body.settings;
     }
-    if (Array.isArray(req.body.customCastes)) {
-      const cleaned = req.body.customCastes.map((c) => String(c).trim()).filter(Boolean);
-      updatePayload.customCastes = cleaned;
-      if (!updatePayload.settings) updatePayload.settings = {};
-      updatePayload.settings.customCastes = cleaned;
-    }
 
-    const org = await Organization.findByIdAndUpdate(req.params.id, updatePayload, { new: true });
+    const org = await Organization.findByIdAndUpdate(req.params.id, updatePayload);
     
     if (!org) return res.status(404).json({ message: 'Organization not found.' });
-    cache.flushAll?.();
-    res.json({ success: true, message: 'Organization updated.', customCastes: org.customCastes || [] });
+    res.json({ success: true, message: 'Organization updated.' });
   } catch (err) {
     console.error('Organization update failed:', err.message);
     res.status(500).json({ message: 'Could not update organization.' });
-  }
-});
-
-// Dedicated endpoints to get and update custom castes for an organization
-router.get('/organizations/:id/custom-castes', verifyToken, async (req, res) => {
-  try {
-    const org = await Organization.findById(req.params.id).lean();
-    if (!org) return res.status(404).json({ message: 'Organization not found.' });
-    res.json({
-      success: true,
-      organizationId: org._id,
-      organizationName: org.name,
-      customCastes: org.customCastes || org.settings?.customCastes || [],
-    });
-  } catch (err) {
-    res.status(500).json({ message: 'Could not fetch custom castes.' });
-  }
-});
-
-router.put('/organizations/:id/custom-castes', verifyToken, async (req, res) => {
-  try {
-    if (req.user.role !== 'admin' && req.user.role !== 'tenant_admin') {
-      return res.status(403).json({ message: 'केवल एडमिन ही जाति सूची बदल सकते हैं।' });
-    }
-    const incomingCastes = req.body.customCastes;
-    if (!Array.isArray(incomingCastes)) {
-      return res.status(400).json({ message: 'कस्टम जाति सूची एक array होनी चाहिए।' });
-    }
-    const cleaned = incomingCastes.map((c) => String(c).trim()).filter(Boolean);
-    const org = await Organization.findById(req.params.id);
-    if (!org) return res.status(404).json({ message: 'संगठन नहीं मिला।' });
-
-    org.customCastes = cleaned;
-    if (!org.settings) org.settings = {};
-    org.settings.customCastes = cleaned;
-    org.markModified('settings');
-    org.markModified('customCastes');
-    await org.save();
-
-    cache.flushAll?.();
-    res.json({
-      success: true,
-      customCastes: cleaned,
-      message: `${org.name} के लिए ${cleaned.length} जातियां सफलतापूर्वक सेव कर दी गईं।`,
-    });
-  } catch (err) {
-    console.error('Custom castes update error:', err.message);
-    res.status(500).json({ message: 'जाति सूची सेव नहीं हो सकी।' });
   }
 });
 
@@ -396,6 +333,175 @@ router.put('/organizations/:id/settings', verifyToken, async (req, res) => {
     res.json({ success: true, settings: updated?.settings || mergedSettings, message: 'सेटिंग्स सफलतापूर्वक अपडेट की गईं।' });
   } catch (err) {
     res.status(500).json({ message: 'Could not update organization settings.' });
+  }
+});
+
+const DEFAULT_CASTES = [
+  'भाट',
+  'ब्राह्मण',
+  'शर्मा',
+  'पालीवाल',
+  'जोगी',
+  'जाट',
+  'राजपूत',
+  'चौधरी',
+  'बिश्नोई',
+  'भील',
+  'देवासी / रबारी',
+  'माहेश्वरी / वैश्य',
+  'कुम्हार / प्रजापत',
+  'सुथार / खाती',
+  'सैन / नाई',
+  'मुस्लिम',
+  'मेघवाल',
+  'लोहार',
+  'राव',
+  'गुर्जर',
+];
+
+// Admin: Get caste options for selected target (user, organization, or global)
+router.get('/caste-options', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { targetType, targetId } = req.query;
+
+    if (targetType === 'user' && targetId) {
+      const user = await User.findById(targetId).select('casteOptions fullName email role organizationId').lean();
+      if (!user) return res.status(404).json({ message: 'User not found' });
+
+      let inheritedFrom = null;
+      let effectiveOptions = user.casteOptions;
+      if (!Array.isArray(effectiveOptions) || effectiveOptions.length === 0) {
+        if (user.organizationId) {
+          const org = await Organization.findById(user.organizationId).select('casteOptions settings').lean();
+          if (org && Array.isArray(org.casteOptions) && org.casteOptions.length > 0) {
+            effectiveOptions = org.casteOptions;
+            inheritedFrom = 'organization';
+          }
+        }
+        if (!effectiveOptions || effectiveOptions.length === 0) {
+          const globalSetting = await SystemSetting.findById('caste_options').lean();
+          effectiveOptions = (globalSetting && Array.isArray(globalSetting.value)) ? globalSetting.value : DEFAULT_CASTES;
+          inheritedFrom = 'global';
+        }
+      }
+
+      return res.json({
+        targetType: 'user',
+        targetId: user._id,
+        targetName: `${user.fullName || ''} (${user.email})`,
+        casteOptions: effectiveOptions,
+        isCustomized: Array.isArray(user.casteOptions) && user.casteOptions.length > 0,
+        inheritedFrom,
+        defaultCastes: DEFAULT_CASTES
+      });
+    }
+
+    if (targetType === 'organization' && targetId) {
+      const org = await Organization.findById(targetId).select('casteOptions settings name').lean();
+      if (!org) return res.status(404).json({ message: 'Organization not found' });
+
+      const customOptions = org.casteOptions || org.settings?.casteOptions;
+      let effectiveOptions = customOptions;
+      let inheritedFrom = null;
+      if (!Array.isArray(effectiveOptions) || effectiveOptions.length === 0) {
+        const globalSetting = await SystemSetting.findById('caste_options').lean();
+        effectiveOptions = (globalSetting && Array.isArray(globalSetting.value)) ? globalSetting.value : DEFAULT_CASTES;
+        inheritedFrom = 'global';
+      }
+
+      return res.json({
+        targetType: 'organization',
+        targetId: org._id,
+        targetName: org.name,
+        casteOptions: effectiveOptions,
+        isCustomized: Array.isArray(customOptions) && customOptions.length > 0,
+        inheritedFrom,
+        defaultCastes: DEFAULT_CASTES
+      });
+    }
+
+    // Global
+    const globalSetting = await SystemSetting.findById('caste_options').lean();
+    const globalOptions = (globalSetting && Array.isArray(globalSetting.value) && globalSetting.value.length > 0)
+      ? globalSetting.value
+      : DEFAULT_CASTES;
+
+    return res.json({
+      targetType: 'global',
+      targetId: 'global',
+      targetName: 'ग्लोबल डिफ़ॉल्ट (सभी यूज़र्स एवं संगठन)',
+      casteOptions: globalOptions,
+      isCustomized: Boolean(globalSetting?.value),
+      inheritedFrom: null,
+      defaultCastes: DEFAULT_CASTES
+    });
+  } catch (err) {
+    console.error('Failed to get caste options for admin:', err);
+    res.status(500).json({ message: 'जाति विकल्प लोड नहीं हो सके।' });
+  }
+});
+
+// Admin: Save custom caste options for selected target
+router.put('/caste-options', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { targetType, targetId, casteOptions } = req.body;
+    if (!Array.isArray(casteOptions)) {
+      return res.status(400).json({ message: 'casteOptions must be an array of strings' });
+    }
+
+    const cleanList = [...new Set(
+      casteOptions
+        .map(c => (typeof c === 'string' ? c.trim() : ''))
+        .filter(Boolean)
+    )];
+
+    if (targetType === 'user') {
+      if (!targetId) return res.status(400).json({ message: 'targetId is required for user' });
+      const updatedUser = await User.findByIdAndUpdate(
+        targetId,
+        { $set: { casteOptions: cleanList } },
+        { new: true }
+      ).select('fullName email casteOptions');
+      if (!updatedUser) return res.status(404).json({ message: 'User not found' });
+      return res.json({
+        success: true,
+        message: `यूज़र "${updatedUser.fullName || updatedUser.email}" के लिए जाति टैग सेव हो गए।`,
+        casteOptions: updatedUser.casteOptions
+      });
+    }
+
+    if (targetType === 'organization') {
+      if (!targetId) return res.status(400).json({ message: 'targetId is required for organization' });
+      const updatedOrg = await Organization.findByIdAndUpdate(
+        targetId,
+        { $set: { casteOptions: cleanList, 'settings.casteOptions': cleanList } },
+        { new: true }
+      ).select('name casteOptions');
+      if (!updatedOrg) return res.status(404).json({ message: 'Organization not found' });
+      return res.json({
+        success: true,
+        message: `संगठन "${updatedOrg.name}" के लिए जाति टैग सेव हो गए।`,
+        casteOptions: updatedOrg.casteOptions
+      });
+    }
+
+    if (targetType === 'global') {
+      await SystemSetting.findByIdAndUpdate(
+        'caste_options',
+        { $set: { value: cleanList, updatedAt: new Date() } },
+        { upsert: true, new: true }
+      );
+      return res.json({
+        success: true,
+        message: 'ग्लोबल डिफ़ॉल्ट जाति टैग सफलतापूर्वक सेव हो गए।',
+        casteOptions: cleanList
+      });
+    }
+
+    return res.status(400).json({ message: 'Invalid targetType' });
+  } catch (err) {
+    console.error('Failed to update caste options:', err);
+    res.status(500).json({ message: 'जाति विकल्प सेव नहीं हो सके।' });
   }
 });
 
@@ -531,8 +637,6 @@ router.put('/organizations/:id/slip-config', verifyToken, async (req, res) => {
       },
       { new: true, upsert: true }
     );
-    cache.del?.(`slip_config_${req.params.id}`);
-    cache.delPrefix?.('slip_config_');
     res.json({ success: true, slipConfig: updated?.slipConfig || {} });
   } catch (err) {
     res.status(500).json({ message: 'Could not update slip configuration.' });
@@ -576,14 +680,25 @@ router.delete('/organizations/:id', verifyToken, isAdmin, async (req, res) => {
   try {
     const { SlipDispatch } = require('../models/index');
 
+    // Clean all voter photos from Cloudinary for this organization
+    const { deleteOrganizationPhotos, deleteVoterPhotos } = require('../lib/cloudinaryService');
+    deleteOrganizationPhotos(orgId).catch(err => console.warn('[admin] Cloudinary org photos cleanup failed:', err.message));
+
     // Sequential cascade deletion (avoids MongoDB transaction concurrency/replica set locks)
     const voterRes = await Voter.deleteMany({ organizationId: orgId });
     const dispRes = await SlipDispatch.deleteMany({ organizationId: orgId });
-    const userRes = await User.deleteMany({ organizationId: orgId });
+    // Protect system admins: only delete tenant-specific users, never global admins
+    const userRes = await User.deleteMany({ organizationId: orgId, role: { $ne: 'admin' } });
     const orgRes = await Organization.deleteOne({ _id: orgId });
 
     if (orgRes.deletedCount === 0) {
       return res.status(404).json({ message: 'Organization not found.' });
+    }
+
+    // Reassign any global admins to an existing organization so they are never orphaned
+    const fallbackOrg = await Organization.findOne({ _id: { $ne: orgId } });
+    if (fallbackOrg) {
+      await User.updateMany({ organizationId: orgId, role: 'admin' }, { organizationId: fallbackOrg._id });
     }
 
     // Flush cache entries for this organization
@@ -780,15 +895,156 @@ router.delete('/master-data', verifyToken, isAdmin, async (req, res) => {
   }
 
   const query = { organizationId: orgId };
-  if (wardNo) query.wardNo = wardNo;
+  if (wardNo) {
+    const cleanWard = wardNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    query.wardNo = { $regex: new RegExp(`^\\s*(?:वार्ड\\s*)?${cleanWard}\\s*$`, 'i') };
+  }
 
   try {
+    // Clean Cloudinary images for deleted voters
+    try {
+      const { deleteOrganizationPhotos, deleteVoterPhotos } = require('../lib/cloudinaryService');
+      if (wardNo) {
+        const votersWithPhotos = await Voter.find(query, { photoUrl: 1 }).lean();
+        const urls = votersWithPhotos.map(v => v.photoUrl).filter(Boolean);
+        if (urls.length > 0) deleteVoterPhotos(urls).catch(e => console.warn('[admin] Cloudinary delete failed:', e.message));
+      } else {
+        deleteOrganizationPhotos(orgId).catch(e => console.warn('[admin] Cloudinary delete failed:', e.message));
+      }
+    } catch (photoErr) {
+      console.warn('[admin] Cloudinary deletion error on master-data delete:', photoErr.message);
+    }
+
     const result = await Voter.deleteMany(query);
+
+    // 🚀 REMOVE WARD FROM ORGANIZATION LIST WHEN WARD DATA IS DELETED:
+    if (wardNo) {
+      const org = await Organization.findById(orgId);
+      if (org) {
+        const cleanTarget = String(wardNo).trim();
+        const filterFn = (w) => {
+          const str = String(w).trim();
+          return str !== cleanTarget && str !== `वार्ड ${cleanTarget}` && str.replace(/^वार्ड\s*/, '') !== cleanTarget.replace(/^वार्ड\s*/, '');
+        };
+        const updatedAllowed = (Array.isArray(org.allowedWards) ? org.allowedWards : []).filter(filterFn);
+        const updatedWards = (Array.isArray(org.wards) ? org.wards : []).filter(filterFn);
+        
+        const slipConfig = org.slipConfig || {};
+        if (slipConfig.wardPollingStations && typeof slipConfig.wardPollingStations === 'object') {
+          delete slipConfig.wardPollingStations[cleanTarget];
+          delete slipConfig.wardPollingStations[`वार्ड ${cleanTarget}`];
+        }
+
+        await Organization.updateOne(
+          { _id: orgId },
+          { 
+            $set: { 
+              allowedWards: updatedAllowed,
+              wards: updatedWards,
+              slipConfig: slipConfig
+            } 
+          }
+        );
+      }
+    } else {
+      // When ALL master data of an organization is deleted, clear all ward registrations
+      await Organization.updateOne(
+        { _id: orgId },
+        { 
+          $set: { 
+            allowedWards: [],
+            wards: []
+          } 
+        }
+      );
+    }
+
     cache.flushAll(); // Clear cache to reflect deletions
-    res.json({ message: 'Records deleted successfully.', deletedCount: result.deletedCount });
+    res.json({ 
+      success: true,
+      message: wardNo 
+        ? `वार्ड ${wardNo} का डेटा और वार्ड सूची से नाम सफलतापूर्वक हटा दिया गया (${result.deletedCount} रिकॉर्ड्स डिलीट हुए)।` 
+        : `संगठन का सारा वोटर डेटा और संबंधित सभी वार्ड्स सफलतापूर्वक हटा दिए गए (${result.deletedCount} रिकॉर्ड्स डिलीट हुए)।`, 
+      deletedCount: result.deletedCount,
+      wardNo: wardNo || undefined
+    });
   } catch (err) {
     console.error('Master data bulk delete failed:', err.message);
-    res.status(500).json({ message: 'Bulk delete failed.' });
+    res.status(500).json({ message: 'डेटा डिलीट करने में त्रुटि आई: ' + err.message });
+  }
+});
+
+// Explicit Ward & Ward Data Deletion endpoint
+router.delete('/wards', verifyToken, isAdmin, async (req, res) => {
+  const orgId = typeof req.query.organizationId === 'string' ? req.query.organizationId.trim() : '';
+  const wardNo = typeof req.query.wardNo === 'string' ? req.query.wardNo.trim() : '';
+
+  if (!orgId || !wardNo) {
+    return res.status(400).json({ message: 'क्लाइंट (organizationId) और वार्ड नंबर आवश्यक हैं।' });
+  }
+
+  try {
+    const cleanTarget = String(wardNo).trim();
+    const cleanRegex = cleanTarget.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    // 1. Delete all voter photos in this ward from Cloudinary
+    try {
+      const { deleteVoterPhotos } = require('../lib/cloudinaryService');
+      const votersWithPhotos = await Voter.find({
+        organizationId: orgId,
+        wardNo: { $regex: new RegExp(`^\\s*(?:वार्ड\\s*)?${cleanRegex}\\s*$`, 'i') },
+        photoUrl: { $exists: true, $ne: '' }
+      }, { photoUrl: 1 }).lean();
+      const urls = votersWithPhotos.map(v => v.photoUrl).filter(Boolean);
+      if (urls.length > 0) deleteVoterPhotos(urls).catch(e => console.warn('[admin] Cloudinary ward photo cleanup failed:', e.message));
+    } catch (cErr) {
+      console.warn('[admin] Cloudinary ward photo cleanup failed:', cErr.message);
+    }
+
+    // 2. Delete all voters in this ward
+    const delResult = await Voter.deleteMany({
+      organizationId: orgId,
+      wardNo: { $regex: new RegExp(`^\\s*(?:वार्ड\\s*)?${cleanRegex}\\s*$`, 'i') }
+    });
+
+    // 2. Remove ward from organization definition
+    const org = await Organization.findById(orgId);
+    if (org) {
+      const filterFn = (w) => {
+        const str = String(w).trim();
+        return str !== cleanTarget && str !== `वार्ड ${cleanTarget}` && str.replace(/^वार्ड\s*/, '') !== cleanTarget.replace(/^वार्ड\s*/, '');
+      };
+      const updatedAllowed = (Array.isArray(org.allowedWards) ? org.allowedWards : []).filter(filterFn);
+      const updatedWards = (Array.isArray(org.wards) ? org.wards : []).filter(filterFn);
+      
+      const slipConfig = org.slipConfig || {};
+      if (slipConfig.wardPollingStations && typeof slipConfig.wardPollingStations === 'object') {
+        delete slipConfig.wardPollingStations[cleanTarget];
+        delete slipConfig.wardPollingStations[`वार्ड ${cleanTarget}`];
+      }
+
+      await Organization.updateOne(
+        { _id: orgId },
+        { 
+          $set: { 
+            allowedWards: updatedAllowed,
+            wards: updatedWards,
+            slipConfig: slipConfig
+          } 
+        }
+      );
+    }
+
+    cache.flushAll();
+    res.json({
+      success: true,
+      message: `वार्ड "${cleanTarget}" और उसके सभी ${delResult.deletedCount} रिकॉर्ड्स संगठन से सफलतापूर्वक हटा दिए गए।`,
+      deletedCount: delResult.deletedCount,
+      wardNo: cleanTarget
+    });
+  } catch (err) {
+    console.error('Ward delete failed:', err);
+    res.status(500).json({ message: 'वार्ड डिलीट करने में त्रुटि आई: ' + err.message });
   }
 });
 
@@ -874,16 +1130,9 @@ router.post('/upload-voters', verifyToken, isAdmin, upload.single('file'), async
     headerRow.eachCell((cell, colNumber) => {
       const rawText = extractCellValue(cell);
       const h = rawText.toLowerCase().replace(/[\s\-_()\/.,]/g, '');
-      if (/^(क्रमांक|serial|srno|sno|serialno|अनुक्रमांक|slno)$/i.test(h) || h.startsWith('serial') || h.startsWith('क्रमांक') || h.startsWith('srno') || h.startsWith('slno')) {
+      if (/^(क्रमांक|serial|srno|sno|serialno|अनुक्रमांक)$/i.test(h) || h.startsWith('serial') || h.startsWith('क्रमांक')) {
         if (!colMap.serialNo) colMap.serialNo = colNumber;
-      } else if (
-        /^(पहचान|पहचानपत्र|पहचानसंख्या|पहचानपत्रसंख्या|पहचानपत्रक्रमांक|मतदातापहचानपत्र|मतदातापहचानसंख्या|मतदातापहचानपत्रक्रमांक|epic|epicno|epicnumber|voterid|voteridno|voteridnumber|votercard|votercardno|कार्डसंख्या|पहचानक्र|पहचाननं|एपिक|एपिकनं|एपिकनंबर|वोटरआईडी|वोटरकार्ड)$/i.test(h) ||
-        h.includes('epic') ||
-        h.includes('पहचान') ||
-        h.includes('वोटर') ||
-        h.includes('voter') ||
-        (h.includes('card') && !h.includes('ration') && !h.includes('aadhar'))
-      ) {
+      } else if (/^(पहचान|पहचानपत्र|epic|epicno|voterid|पहचानपत्रepicno)$/i.test(h) || h.includes('epic') || h.startsWith('पहचान')) {
         if (!colMap.epic) colMap.epic = colNumber;
       } else if (h.includes('नाम') || h.includes('name')) {
         if (h.includes('संबंधी') || h.includes('पिता') || h.includes('पति') || h.includes('relative') || h.includes('father') || h.includes('husband')) {
@@ -928,35 +1177,6 @@ router.post('/upload-voters', verifyToken, isAdmin, upload.single('file'), async
       }
     });
 
-    // 🧠 Data-driven auto-detection: If EPIC column was not matched via headers, inspect first 15 rows
-    if (!colMap.epic) {
-      const candidateCols = {};
-      const epicPattern = /^[A-Z]{2,4}[\s\/-]?\d{6,8}$|^[A-Z]{2,3}[\s\/-]\d{1,3}[\s\/-]\d{1,3}[\s\/-]\d{3,7}$/i;
-      const maxCheckRows = Math.min(worksheet.rowCount || 20, 15);
-      for (let r = 2; r <= maxCheckRows; r++) {
-        const checkRow = worksheet.getRow(r);
-        checkRow.eachCell((c, colNum) => {
-          if (colNum === colMap.serialNo) return;
-          const val = extractCellValue(c);
-          if (val && epicPattern.test(val)) {
-            candidateCols[colNum] = (candidateCols[colNum] || 0) + 1;
-          }
-        });
-      }
-      let bestCol = null;
-      let maxCount = 0;
-      for (const [col, count] of Object.entries(candidateCols)) {
-        if (count > maxCount) {
-          maxCount = count;
-          bestCol = parseInt(col, 10);
-        }
-      }
-      if (bestCol && maxCount >= 2) {
-        colMap.epic = bestCol;
-        console.log(`[admin.upload-voters] Auto-detected EPIC column ${bestCol} from data pattern (${maxCount} matches)`);
-      }
-    }
-
     const isMapped = Boolean(colMap.epic || colMap.nameHi || colMap.serialNo);
     const getVal = (row, colKey, fallbackIndex) => {
       const colIdx = isMapped && colMap[colKey] ? colMap[colKey] : fallbackIndex;
@@ -976,8 +1196,6 @@ router.post('/upload-voters', verifyToken, isAdmin, upload.single('file'), async
       return s;
     };
 
-    const epicFallbackCol = colMap.serialNo === 1 ? 2 : 1;
-
     const parseRow = (row, rowNumber) => {
       const cellText = (colKey, fallbackIdx) => getVal(row, colKey, fallbackIdx);
       
@@ -987,11 +1205,7 @@ router.post('/upload-voters', verifyToken, isAdmin, upload.single('file'), async
         serialNo = rowNumber - 1;
       }
 
-      let epic = cellText('epic', epicFallbackCol).toUpperCase().replace(/[\s\u200B\uFEFF]/g, '');
-      // Safety: If epic was read as a simple 1-5 digit integer, it is a serial number, not a real EPIC
-      if (epic && /^\d{1,5}$/.test(epic)) {
-        epic = '';
-      }
+      let epic = cellText('epic', 1).toUpperCase().replace(/[\s\u200B\uFEFF]/g, '');
       const nameEn = cellText('nameEn', 5);
       let nameHi = cellText('nameHi', 6);
       if (!nameHi && nameEn) nameHi = nameEn;
@@ -1184,8 +1398,8 @@ router.get('/export-voters', verifyToken, isAdmin, async (req, res) => {
     const voters = await Voter.find(query).sort({ wardNo: 1, partNo: 1, serialNo: 1 }).lean();
     
     const workbook = createWorkbook();
-    addSheet(workbook, 'मतदाता सूची', voters.map((v) => ({
-      'क्रमांक': v.serialNo,
+    addSheet(workbook, 'मतदाता सूची', voters.map((v, index) => ({
+      'क्रमांक': index + 1,
       'पहचान पत्र (EPIC No)': v.epic,
       'मतदाता का नाम': v.nameHi || '',
       'संबंधी का नाम': v.relativeNameHi || '',
@@ -1204,11 +1418,11 @@ router.get('/export-voters', verifyToken, isAdmin, async (req, res) => {
       'मतदान स्थिति': v.voted ? 'वोट दिया' : 'शेष'
     })));
 
-    addSheet(workbook, 'Voters', voters.map((v) => ({
+    addSheet(workbook, 'Voters', voters.map((v, index) => ({
       'EPIC No': v.epic,
       'Ward': v.wardNo,
       'Part': v.partNo,
-      'Serial No': v.serialNo,
+      'Serial No': index + 1,
       'Name (English)': '',
       'Name (Hindi)': v.nameHi,
       'Age': v.age,
@@ -1329,8 +1543,8 @@ const SAMPLE_DEMO_NAMES = [
   { hi: 'कमला देवी शर्मा', en: 'Kamla Devi Sharma', relHi: 'रामगोपाल शर्मा', relEn: 'Ramgopal Sharma', relType: 'पति', caste: 'ब्राह्मण', house: '14' },
   { hi: 'सुरेश कुमार मीणा', en: 'Suresh Kumar Meena', relHi: 'रामकेश मीणा', relEn: 'Ramkesh Meena', relType: 'पिता', caste: 'मीणा', house: '21' },
   { hi: 'सुनीता मीणा', en: 'Sunita Meena', relHi: 'सुरेश कुमार मीणा', relEn: 'Suresh Kumar Meena', relType: 'पति', caste: 'मीणा', house: '21' },
-  { hi: 'विजय सिंह शेखावत', en: 'Vijay Singh Shekhawat', relHi: 'प्रताप सिंह', relEn: 'Pratap Singh', relType: 'पिता', caste: 'राजपूत', house: '32' },
-  { hi: 'कौशल्या कंवर', en: 'Kaushalya Kanwar', relHi: 'विजय सिंह शेखावत', relEn: 'Vijay Singh Shekhawat', relType: 'पति', caste: 'राजपूत', house: '32' },
+  { hi: 'विक्रम सिंह शेखावत', en: 'Vikram Singh Shekhawat', relHi: 'प्रताप सिंह', relEn: 'Pratap Singh', relType: 'पिता', caste: 'राजपूत', house: '32' },
+  { hi: 'कौशल्या कंवर', en: 'Kaushalya Kanwar', relHi: 'विक्रम सिंह शेखावत', relEn: 'Vikram Singh Shekhawat', relType: 'पति', caste: 'राजपूत', house: '32' },
   { hi: 'राकेश कुमार जाट', en: 'Rakesh Kumar Jat', relHi: 'बलदेव जाट', relEn: 'Baldev Jat', relType: 'पिता', caste: 'जाट', house: '45' },
   { hi: 'मंजू जाट', en: 'Manju Jat', relHi: 'राकेश कुमार जाट', relEn: 'Rakesh Kumar Jat', relType: 'पति', caste: 'जाट', house: '45' },
   { hi: 'अब्दुल रशीद खान', en: 'Abdul Rasheed Khan', relHi: 'बशीर खान', relEn: 'Basheer Khan', relType: 'पिता', caste: 'मुस्लिम', house: '58' },
@@ -1374,7 +1588,7 @@ router.post('/demo-user', verifyToken, isAdmin, async (req, res) => {
 
     const email = (customEmail && typeof customEmail === 'string' && customEmail.includes('@'))
       ? customEmail.trim().toLowerCase()
-      : `${defaultPrefix || 'demo'}_${randomCode}@vijaysetu.com`;
+      : `${defaultPrefix || 'demo'}_${randomCode}@matdataportal.com`;
 
     const existingUser = await User.findOne({ email });
     if (existingUser) {
@@ -1423,7 +1637,7 @@ router.post('/demo-user', verifyToken, isAdmin, async (req, res) => {
       email,
       passwordHash,
       fullName: name,
-      phone: '7231077770',
+      phone: '9876543210',
       role: 'tenant_admin',
       organizationId: orgId,
       isActive: true,
@@ -1566,6 +1780,9 @@ router.put('/demo-users/:id/toggle-suspend', verifyToken, isAdmin, async (req, r
 router.delete('/demo-users/:id', verifyToken, isAdmin, async (req, res) => {
   try {
     const { id } = req.params;
+    const { deleteOrganizationPhotos } = require('../lib/cloudinaryService');
+    deleteOrganizationPhotos(id).catch(e => console.warn('[admin] Cloudinary demo cleanup failed:', e.message));
+
     await Organization.deleteOne({ _id: id });
     await User.deleteMany({ organizationId: id });
     await Voter.deleteMany({ organizationId: id });
@@ -1670,6 +1887,54 @@ router.put('/wards/rename', verifyToken, isAdmin, async (req, res) => {
   } catch (err) {
     console.error('Failed to rename ward:', err);
     res.status(500).json({ message: 'वार्ड का नाम बदलने में त्रुटि आई: ' + err.message });
+  }
+});
+
+
+// Dedicated endpoints to get and update custom castes for an organization (backward compatibility)
+router.get('/organizations/:id/custom-castes', verifyToken, async (req, res) => {
+  try {
+    const org = await Organization.findById(req.params.id).lean();
+    if (!org) return res.status(404).json({ message: 'Organization not found.' });
+    const castes = org.casteOptions || org.customCastes || org.settings?.customCastes || [];
+    res.json({
+      success: true,
+      organizationId: org._id,
+      organizationName: org.name,
+      customCastes: castes,
+      casteOptions: castes,
+    });
+  } catch (err) {
+    res.status(500).json({ message: 'Could not fetch custom castes.' });
+  }
+});
+
+router.put('/organizations/:id/custom-castes', verifyToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin' && req.user.role !== 'tenant_admin') {
+      return res.status(403).json({ message: 'केवल एडमिन ही जाति सूची बदल सकते हैं।' });
+    }
+    const incomingCastes = req.body.customCastes || req.body.casteOptions;
+    if (!Array.isArray(incomingCastes)) {
+      return res.status(400).json({ message: 'कस्टम जाति सूची एक array होनी चाहिए।' });
+    }
+    const cleaned = incomingCastes.map((c) => String(c).trim()).filter(Boolean);
+    const org = await Organization.findById(req.params.id);
+    if (!org) return res.status(404).json({ message: 'Organization not found.' });
+
+    org.customCastes = cleaned;
+    org.casteOptions = cleaned;
+    await org.save();
+    try { cache.flushAll?.(); } catch {}
+
+    res.json({
+      success: true,
+      message: 'जाति सूची सफलतापूर्वक अपडेट की गई।',
+      customCastes: cleaned,
+      casteOptions: cleaned
+    });
+  } catch (err) {
+    res.status(500).json({ message: 'Could not update custom castes.' });
   }
 });
 

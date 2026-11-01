@@ -7,7 +7,8 @@ exports.verifyToken = async (req, res, next) => {
 
   let claims;
   try {
-    claims = jwt.verify(token, process.env.JWT_SECRET);
+    const JWT_SECRET = process.env.JWT_SECRET || process.env.JWT_SECRET || 'vijaysetu_election_war_room_secret';
+    claims = jwt.verify(token, JWT_SECRET);
   } catch (err) {
     return res.status(401).json({ message: 'Invalid or Expired Token' });
   }
@@ -20,9 +21,9 @@ exports.verifyToken = async (req, res, next) => {
         error: 'Account Suspended',
         message: 'आपका खाता एडमिन द्वारा बंद (Suspend) किया गया है। कृपया आगे की सेवा के लिए एडमिन से संपर्क करें।',
         contact: {
-          name: 'Roots Reach Media',
-          phone: '7231077770',
-          formattedPhone: '+91 72310 77770'
+          name: 'सिस्टम एडमिनिस्ट्रेशन (System Support)',
+          phone: '',
+          formattedPhone: 'पोर्टल एडमिन से संपर्क करें'
         }
       });
     }
@@ -33,18 +34,21 @@ exports.verifyToken = async (req, res, next) => {
         error: 'Account Suspended',
         message: 'आपका संगठन/खाता एडमिन द्वारा बंद (Suspend) किया गया है। कृपया आगे की सेवा के लिए एडमिन से संपर्क करें।',
         contact: {
-          name: 'Roots Reach Media',
-          phone: '7231077770',
-          formattedPhone: '+91 72310 77770'
+          name: 'सिस्टम एडमिनिस्ट्रेशन (System Support)',
+          phone: '',
+          formattedPhone: 'पोर्टल एडमिन से संपर्क करें'
         }
       });
     }
 
+    const orgModules = organization.enabledModules && organization.enabledModules.length > 0 ? organization.enabledModules : null;
     const enabledModules = user.role === 'admin'
       ? []
       : user.role === 'tenant_admin'
-        ? (organization.enabledModules || [])
-        : (user.modules || []).filter((module) => (organization.enabledModules || []).includes(module));
+        ? (orgModules || [])
+        : orgModules
+          ? (user.modules || []).filter((module) => orgModules.includes(module))
+          : (user.modules || []);
     req.user = {
       id: user._id,
       role: user.role,

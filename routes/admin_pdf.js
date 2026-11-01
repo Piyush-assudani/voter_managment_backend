@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const cron = require('node-cron');
 const { Voter } = require('../models');
 const { fixCorruptedHindi } = require('../lib/hindiDictionary');
+const { safeRegex } = require('../lib/regexUtils');
 const { verifyToken, isAdmin } = require('../middleware/authMiddleware');
 
 const uploadDir = path.join(__dirname, '../uploads');
@@ -24,20 +25,11 @@ const upload = multer({
   limits: { fileSize: 100 * 1024 * 1024 } // 100MB limit
 });
 
-const uploadJobs = new Map();
+const pdfQueue = require('../lib/pdfQueue');
 
-// Task 4: STRICT AUTOMATED CLEANUP (2-Hour Deletion)
+// Task 4: STRICT AUTOMATED CLEANUP (2-Hour Deletion for PDF files)
 cron.schedule('0 * * * *', () => {
   console.log('Running PDF cleanup cron job...');
-  
-  // Cleanup uploadJobs map (older than 2 hours)
-  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-  for (const [id, job] of uploadJobs.entries()) {
-    if (new Date(job.uploadedAt) < twoHoursAgo) {
-      uploadJobs.delete(id);
-    }
-  }
-
   fs.readdir(uploadDir, (err, files) => {
     if (err) return console.error('Cleanup error:', err);
     files.forEach(file => {
@@ -63,46 +55,34 @@ cron.schedule('0 * * * *', () => {
 // GET /jobs - to fetch recent upload jobs (SuperAdmin Only)
 router.get('/jobs', verifyToken, isAdmin, (req, res) => {
   const orgId = req.query.organizationId;
-  
-  // Deduplicate identical duplicate jobs in memory (same file, same org, within 20s)
-  const seenJobKeys = new Set();
-  for (const [id, job] of uploadJobs.entries()) {
-    const timeBucket = Math.floor(new Date(job.uploadedAt).getTime() / 20000);
-    const key = `${job.organizationId}_${job.filename}_${job.wardNo || ''}_${timeBucket}`;
-    if (seenJobKeys.has(key)) {
-      uploadJobs.delete(id);
-    } else {
-      seenJobKeys.add(key);
-    }
-  }
-
-  let jobs = Array.from(uploadJobs.values());
-  if (orgId) {
-    jobs = jobs.filter(j => j.organizationId === orgId);
-  }
-  jobs.sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime());
+  const jobs = pdfQueue.getJobs(orgId);
   res.json(jobs);
 });
 
+// GET /queue-status - Real-time telemetry on the sequential PDF processing queue
+router.get('/queue-status', verifyToken, isAdmin, (req, res) => {
+  res.json(pdfQueue.getQueueStatus());
+});
+
 // DELETE /jobs/:id - remove single job from history (SuperAdmin Only)
-router.delete('/jobs/:id', verifyToken, isAdmin, (req, res) => {
+router.delete('/jobs/:id', verifyToken, isAdmin, async (req, res) => {
   const { id } = req.params;
-  if (uploadJobs.has(id)) {
-    uploadJobs.delete(id);
+  const deleted = await pdfQueue.deleteJob(id);
+  if (deleted) {
     return res.json({ success: true, message: 'जॉब हटा दी गई।' });
   }
   res.status(404).json({ error: 'Job not found' });
 });
 
 // DELETE /jobs - clear upload jobs (SuperAdmin Only)
-router.delete('/jobs', verifyToken, isAdmin, (req, res) => {
-  uploadJobs.clear();
+router.delete('/jobs', verifyToken, isAdmin, async (req, res) => {
+  await pdfQueue.clearJobs();
   res.json({ success: true, message: 'Upload history cleared.' });
 });
 
 // GET /download-excel/:id - Download generated Excel file for a PDF job
 router.get('/download-excel/:id', verifyToken, isAdmin, (req, res) => {
-  const job = uploadJobs.get(req.params.id);
+  const job = pdfQueue.getJob(req.params.id);
   if (!job || !job.excelPath || !fs.existsSync(job.excelPath)) {
     return res.status(404).json({ error: 'Excel फाइल उपलब्ध नहीं है या अभी प्रोसेस हो रही है।' });
   }
@@ -158,7 +138,9 @@ router.post('/upload', verifyToken, isAdmin, (req, res, next) => {
     const organizationId = req.body.organizationId || "org_default";
     const uploadedBy = (req.body.uploadedBy || "").trim();
     const useOcr = req.body.useOcr === 'true' || req.body.useOcr === 'on' || req.body.useOcr === true;
+    const withPhotos = req.body.withPhotos !== 'false' && req.body.withPhotos !== false;
     const globalWard = (req.body.wardNo || "").trim();
+    const globalPanchayat = (req.body.panchayat || "").trim();
     const globalBooth = (req.body.boothNo || "").trim();
     const globalDesc = (req.body.listDescription || "").trim();
 
@@ -221,176 +203,55 @@ router.post('/upload', verifyToken, isAdmin, (req, res, next) => {
         }
       }
 
-      // Auto-register ward in Organization if new
-      if (wardNo && organizationId) {
+      // Auto-register ward & panchayat in Organization if new
+      if (organizationId) {
         try {
-          if (Organization) {
+          const updateObj = {};
+          if (wardNo) {
+            updateObj.wards = wardNo;
+            updateObj.allowedWards = wardNo;
+          }
+          if (globalPanchayat) {
+            updateObj.panchayats = globalPanchayat;
+            updateObj.allowedPanchayats = globalPanchayat;
+          }
+          if (Organization && (wardNo || globalPanchayat)) {
             await Organization.updateOne(
               { _id: organizationId },
-              { $addToSet: { wards: wardNo, allowedWards: wardNo } }
+              { $addToSet: updateObj }
             );
           }
         } catch (orgErr) {
-          console.warn('Could not update organization wards:', orgErr.message);
+          console.warn('Could not update organization wards/panchayats:', orgErr.message);
         }
       }
 
       const jobId = crypto.randomUUID();
       const listDescription = globalDesc || (pdfFiles.length > 1 ? file.originalname : (wardNo ? `वार्ड ${wardNo} मतदाता सूची` : ''));
+      // Always extract photos by default unless explicitly disabled by user
+      const fileWithPhotos = withPhotos;
 
-      uploadJobs.set(jobId, {
+      const createdJob = await pdfQueue.enqueueJob({
         id: jobId,
         filename: file.originalname,
-        organizationId: organizationId,
-        wardNo: wardNo,
-        boothNo: boothNo,
-        uploadedBy: uploadedBy,
-        listDescription: listDescription,
-        status: 'processing',
-        progress: 5,
-        stageMessage: '📄 PDF फ़ाइल प्राप्त हुई, प्रक्रिया शुरू...',
-        extractedCount: 0,
-        uploadedAt: new Date().toISOString()
+        filePath,
+        organizationId,
+        wardNo,
+        panchayat: globalPanchayat,
+        boothNo,
+        uploadedBy,
+        withPhotos: fileWithPhotos,
+        useOcr,
+        listDescription
       });
 
-      createdJobs.push({ jobId, filename: file.originalname, wardNo });
-
-      // Start worker thread
-      const worker = new Worker(path.join(__dirname, '../workers/pdfWorker.js'), {
-        workerData: {
-          filePath,
-          organizationId,
-          useOcr,
-          wardNo,
-          boothNo,
-          uploadedBy
-        }
-      });
-
-      worker.on('message', async (msg) => {
-        if (msg.type === 'progress') {
-          uploadJobs.set(jobId, { 
-            ...uploadJobs.get(jobId), 
-            progress: typeof msg.data === 'number' ? msg.data : (msg.progress || 0),
-            stageMessage: msg.stage || uploadJobs.get(jobId)?.stageMessage || 'प्रोसेसिंग चालू है...'
-          });
-        } else if (msg.type === 'done') {
-          const operations = msg.data;
-          const epicsCount = msg.epicsCount;
-          
-          try {
-            if (operations && operations.length > 0) {
-              const CHUNK_SIZE = 2500;
-              let processed = 0;
-              for (let i = 0; i < operations.length; i += CHUNK_SIZE) {
-                const chunk = operations.slice(i, i + CHUNK_SIZE);
-                await Voter.bulkWrite(chunk, { ordered: false });
-                processed += chunk.length;
-                const dbProgress = Math.floor((processed / operations.length) * 11);
-                uploadJobs.set(jobId, { 
-                  ...uploadJobs.get(jobId), 
-                  progress: 88 + dbProgress,
-                  stageMessage: `💾 सत्यापित डेटा डेटाबेस में सुरक्षित हो रहा है (${processed}/${operations.length})...`
-                });
-              }
-
-              // 🚀 AUTOMATIC WARD ROLL SYNCHRONIZATION:
-              // Remove any stale or deleted serials from previous uploads that are no longer active in this roll.
-              // This guarantees the database count matches the uploaded PDF 100% even if re-uploaded without deleting first.
-              try {
-                const activeSerialsByWard = new Map();
-                for (const op of operations) {
-                  const f = op.updateOne?.filter;
-                  if (f && f.wardNo && f.serialNo) {
-                    const key = `${f.wardNo}_${f.partNo || ''}`;
-                    if (!activeSerialsByWard.has(key)) {
-                      activeSerialsByWard.set(key, { wardNo: f.wardNo, partNo: f.partNo, serials: new Set() });
-                    }
-                    activeSerialsByWard.get(key).serials.add(f.serialNo);
-                  }
-                }
-                for (const { wardNo: wNo, partNo: pNo, serials } of activeSerialsByWard.values()) {
-                  const cleanupFilter = {
-                    organizationId: organizationId,
-                    wardNo: wNo,
-                    serialNo: { $nin: Array.from(serials) }
-                  };
-                  if (pNo) cleanupFilter.partNo = pNo;
-                  const delRes = await Voter.deleteMany(cleanupFilter);
-                  if (delRes.deletedCount > 0) {
-                    console.log(`[admin_pdf] Synchronized Ward ${wNo}: Removed ${delRes.deletedCount} stale/deleted records from previous uploads.`);
-                  }
-                }
-              } catch (cleanErr) {
-                console.warn('[admin_pdf] Ward synchronization cleanup warning:', cleanErr.message);
-              }
-            }
-
-            // Sync any newly learned dictionary entries to MongoDB
-            try {
-              const { syncFromDiskToDb } = require('../lib/dictionaryService');
-              await syncFromDiskToDb();
-            } catch {}
-            
-            uploadJobs.set(jobId, {
-              ...uploadJobs.get(jobId),
-              status: 'completed',
-              progress: 100,
-              stageMessage: '✅ सत्यापन व डिक्शनरी विस्तार पूर्ण! सभी मतदाता रिकॉर्ड्स सुरक्षित हो गए हैं।',
-              extractedCount: epicsCount,
-              excelPath: msg.excelPath,
-              excelFilename: msg.excelFilename,
-              hasExcel: Boolean(msg.excelPath)
-            });
-
-            // Invalidate cache immediately so UI shows exact live voter counts
-            try {
-              const cache = require('../lib/cache');
-              if (cache && cache.flushAll) {
-                cache.flushAll();
-              }
-            } catch {}
-
-            console.log(`Background PDF processing complete for ${filePath}. Extracted ${epicsCount} voters. Excel: ${msg.excelFilename}`);
-          } catch (dbError) {
-            uploadJobs.set(jobId, { 
-              ...uploadJobs.get(jobId), 
-              status: 'failed', 
-              progress: 0, 
-              errorMessage: `डेटाबेस में सुरक्षित करने में त्रुटि: ${dbError.message}` 
-            });
-            console.error(`Database write failed for ${filePath}:`, dbError);
-          }
-        } else if (msg.type === 'error') {
-          uploadJobs.set(jobId, { 
-            ...uploadJobs.get(jobId), 
-            status: 'failed', 
-            progress: 0, 
-            errorMessage: msg.data || 'PDF पार्सिंग में समस्या आई।' 
-          });
-          console.error(`Worker PDF processing failed for ${filePath}:`, msg.data);
-        }
-      });
-
-      worker.on('error', (err) => {
-        uploadJobs.set(jobId, { 
-          ...uploadJobs.get(jobId), 
-          status: 'failed', 
-          progress: 0, 
-          errorMessage: err.message || 'Worker thread execution error' 
-        });
-        console.error(`Worker error for ${filePath}:`, err);
-      });
-
-      worker.on('exit', (code) => {
-        if (code !== 0 && uploadJobs.get(jobId)?.status !== 'completed') {
-          uploadJobs.set(jobId, { 
-            ...uploadJobs.get(jobId), 
-            status: 'failed', 
-            progress: 0, 
-            errorMessage: `Worker process exited with code ${code}` 
-          });
-        }
+      createdJobs.push({
+        jobId,
+        filename: file.originalname,
+        wardNo,
+        panchayat: globalPanchayat,
+        withPhotos: fileWithPhotos,
+        status: createdJob.status
       });
     }
 
@@ -408,5 +269,158 @@ router.post('/upload', verifyToken, isAdmin, (req, res, next) => {
   }
 });
 
-router.uploadJobs = uploadJobs;
+// GET /unreadable-deleted - List voters with Deleted or Unreadable status for side panel review
+router.get('/unreadable-deleted', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const orgId = req.query.organizationId || req.user.organizationId || 'org_demo_election_2025';
+    const { ward, panchayat, status } = req.query;
+
+    const baseQuery = { organizationId: orgId };
+    if (ward) {
+      baseQuery.wardNo = String(ward).trim();
+    }
+    if (panchayat) {
+      const panchayatRegex = safeRegex(panchayat);
+      if (panchayatRegex) baseQuery.panchayat = panchayatRegex;
+    }
+
+    let statusCondition = { $in: ['Deleted', 'Unreadable'] };
+    if (status === 'Deleted' || status === 'Unreadable') {
+      statusCondition = status;
+    }
+
+    const voters = await Voter.find({ ...baseQuery, status: statusCondition })
+      .sort({ serialNo: 1, wardNo: 1 })
+      .lean();
+
+    const deleted = voters.filter(v => v.status === 'Deleted');
+    const unreadable = voters.filter(v => v.status === 'Unreadable');
+
+    res.json({
+      success: true,
+      total: voters.length,
+      deletedCount: deleted.length,
+      unreadableCount: unreadable.length,
+      deleted,
+      unreadable
+    });
+  } catch (err) {
+    console.error('Failed to fetch unreadable/deleted voters:', err);
+    res.status(500).json({ error: 'Failed to fetch unreadable/deleted voters' });
+  }
+});
+
+// POST /recover-voter - Recover deleted voter(s) and add back to active list
+router.post('/recover-voter', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { voterId, voterIds } = req.body;
+    const ids = voterIds && Array.isArray(voterIds) ? voterIds : (voterId ? [voterId] : []);
+    if (!ids.length) {
+      return res.status(400).json({ error: 'कृपया कम से कम एक वोटर आईडी दें।' });
+    }
+
+    const result = await Voter.updateMany(
+      { _id: { $in: ids } },
+      { 
+        $set: { 
+          status: 'Active',
+          voted: false
+        } 
+      }
+    );
+
+    // Clean up any "(विलोपित)" suffix from nameHi if present
+    const voters = await Voter.find({ _id: { $in: ids } });
+    for (const v of voters) {
+      if (v.nameHi && v.nameHi.includes('विलोपित')) {
+        v.nameHi = v.nameHi.replace(/[\(\[\{]?विलोपित[\)\]\}]?/g, '').trim();
+        await v.save();
+      }
+    }
+
+    // Invalidate cache
+    try {
+      const cache = require('../lib/cache');
+      if (cache && cache.flushAll) cache.flushAll();
+    } catch {}
+
+    res.json({
+      success: true,
+      message: `${result.modifiedCount} मतदाता सफलतापूर्वक पुनः सक्रिय (Recover) किए गए और मुख्य सूची में जोड़े गए।`,
+      recoveredCount: result.modifiedCount
+    });
+  } catch (err) {
+    console.error('Failed to recover voter:', err);
+    res.status(500).json({ error: 'मतदाता को पुनः सक्रिय करने में समस्या आई।' });
+  }
+});
+
+// PUT /update-unreadable-voter - Edit unreadable voter details and activate into active list
+router.put('/update-unreadable-voter', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const { voterId, nameHi, nameEn, relativeNameHi, relationType, houseNo, age, gender, epic, serialNo, wardNo, panchayat, caste } = req.body;
+    if (!voterId) {
+      return res.status(400).json({ error: 'voterId आवश्यक है।' });
+    }
+
+    const voter = await Voter.findById(voterId);
+    if (!voter) {
+      return res.status(404).json({ error: 'मतदाता रिकॉर्ड नहीं मिला।' });
+    }
+
+    const oldName = voter.nameHi;
+    const oldRel = voter.relativeNameHi;
+
+    if (nameHi) voter.nameHi = String(nameHi).trim();
+    if (nameEn) voter.nameEn = String(nameEn).trim();
+    if (relativeNameHi !== undefined) voter.relativeNameHi = String(relativeNameHi).trim();
+    if (relationType) voter.relationType = String(relationType).trim();
+    if (houseNo !== undefined) voter.houseNo = String(houseNo).trim();
+    if (age !== undefined) voter.age = Number(age) || voter.age;
+    if (gender) voter.gender = String(gender).trim();
+    if (epic) voter.epic = String(epic).trim();
+    if (serialNo !== undefined) voter.serialNo = Number(serialNo) || voter.serialNo;
+    if (wardNo) voter.wardNo = String(wardNo).trim();
+    if (panchayat !== undefined) voter.panchayat = String(panchayat).trim();
+    if (caste) voter.caste = String(caste).trim();
+
+    voter.status = 'Active'; // Activate!
+    voter.notes = 'अपठनीय कार्ड को सफलतापूर्वक संपादित करके सक्रिय किया गया।';
+
+    await voter.save();
+
+    // 🧠 Dynamic Self-Learning Dictionary Feedback Loop:
+    try {
+      const { learnNameCorrection } = require('../lib/dictionaryService');
+      if (nameHi && oldName && oldName !== String(nameHi).trim()) {
+        void learnNameCorrection(oldName, String(nameHi).trim(), `admin_unreadable_fix_${voter._id}`);
+      } else if (nameHi) {
+        void learnNameCorrection('', String(nameHi).trim(), `admin_unreadable_fix_${voter._id}`);
+      }
+      if (relativeNameHi && oldRel && oldRel !== String(relativeNameHi).trim()) {
+        void learnNameCorrection(oldRel, String(relativeNameHi).trim(), `admin_unreadable_rel_${voter._id}`);
+      }
+    } catch (lErr) {
+      console.warn('[AdminPdf] learnNameCorrection warning:', lErr.message);
+    }
+
+    // Invalidate cache
+    try {
+      const cache = require('../lib/cache');
+      if (cache && cache.flushAll) cache.flushAll();
+    } catch {}
+
+    res.json({
+      success: true,
+      message: 'मतदाता का विवरण सफलतापूर्वक सही किया गया और मुख्य सूची में जोड़ दिया गया।',
+      voter
+    });
+  } catch (err) {
+    console.error('Failed to update unreadable voter:', err);
+    res.status(500).json({ error: 'मतदाता को संपादित करने में समस्या आई।' });
+  }
+});
+
+router.uploadJobs = pdfQueue.inMemoryJobs;
+router.pdfQueue = pdfQueue;
 module.exports = router;

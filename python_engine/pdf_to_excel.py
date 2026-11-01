@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-VijaySetu State-of-the-Art Electoral Roll PDF to Excel Engine
+MatdataPortal State-of-the-Art Electoral Roll PDF to Excel Engine
 Implements the 7 Architectural Pillars:
 1. Direct PDF Parsing (Bina OCR ke): Checks for clean digital Unicode text layers before invoking OCR.
 2. Ensemble OCR (Multi-Model Voting): Combines Tesseract 5 LSTM and EasyOCR Neural Engine with confidence arbitration.
@@ -160,12 +160,11 @@ def surya_recognize_card(card_img: Image.Image) -> Dict[str, Any]:
                 if c:
                     rel_name = c
 
-            hm = re.search(r'(?:मकान|गृह|मकारन|म\s*[\.०]?\s*सं|म\s*[\.०]?\s*क्र|H(?:ouse)?\.?\s*No\.?)\s*(?:संख्या|नंबर|नं|क्रं|सपखजर)?\s*[:ः\-\s]*(.+)', t)
+            hm = re.search(r'(?:मकान|गृह|मकारन|मकरन|म\.?\s*सं\.?|म\.?\s*नं\.?|म०\s*सं०?|म०\s*नं०?|house|h\.no)\s*(?:संख्या|नंबर|नं|क्रं|सपखजर|सपखसर)?\s*[:ः\-\s]*(.+)', t, re.I)
             if hm and not house:
-                raw_c = hm.group(1).strip()
-                raw_c = re.split(r'\b(?:आयु|उम्र|आजच|आय|लिंग|सलग|जेंडर|Sex|फोटो|उपलब्ध|विलोपित|DELETED)\b', raw_c, flags=re.IGNORECASE)[0].strip()
-                c = re.sub(r'^(?:संख्या|नंबर|नं|क्रं)+[:ः\-\s]*', '', raw_c).strip()
-                if c and c not in ['-', '०', ':', '']:
+                c = hm.group(1).strip()
+                c = re.sub(r'^(?:संख्या|नंबर|नं|क्रं|सपखजर|सपखसर)+[:ः\-\s]*', '', c).strip()
+                if c and c not in ['-', '०', '0', '00', ':', '']:
                     cleaned_h = clean_house_no(c)
                     if cleaned_h and cleaned_h != '-':
                         house = cleaned_h
@@ -343,7 +342,93 @@ RAJASTHAN_LEXICON = {
     'रामस्वरूप', 'घनश्याम', 'भागचंद', 'नारायण', 'चंद्रप्रकाश',
     'रामकिशन', 'ओंकार', 'मूलचंद', 'हरकिशन', 'रामनिवास',
     'बिरजू', 'छगन', 'पन्ना', 'फूल', 'मोती', 'हीरा', 'लाडली',
+    'ककली', 'मूमली', 'आम्बु', 'प्रतापराम', 'सेवाराम', 'कालूराम', 'प्रताप',
+    'फूली', 'लाछी', 'खामली', 'रोशनी', 'मांगी', 'नजीर', 'हसम', 'रोशन', 'शान्ती', 'बदामी', 'केसरी', 'छोटी', 'धपू', 'खां',
 }
+
+# Dynamically merge all 22,000+ authentic Indian & Rajasthani names from master JSON
+try:
+    _master_p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'master_indian_names.json')
+    if os.path.exists(_master_p):
+        with open(_master_p, 'r', encoding='utf-8') as _mf:
+            for _item in json.load(_mf):
+                if _item and isinstance(_item, str):
+                    for _part in _item.split():
+                        if len(_part) >= 2:
+                            RAJASTHAN_LEXICON.add(_part.strip())
+except Exception as _e:
+    pass
+
+# Shared glyph-corruption data (same file the Node engine uses)
+GLYPH_EXACT = {}
+GLYPH_VOCAB = set()
+try:
+    _gp = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'glyph_corrections.json')
+    with open(_gp, 'r', encoding='utf-8') as _gf:
+        _gd = json.load(_gf)
+    GLYPH_EXACT = {k: v for k, v in _gd.get('exact_words', {}).items()}
+    GLYPH_VOCAB = set(_gd.get('village_vocab', []))
+except Exception:
+    pass
+
+_GLYPH_OPTS = {'ल': ['ी'], 'प': ['ो', 'ं', 'ू', 'ों'], 'क': ['ों']}
+
+
+def is_known_word(w: str) -> bool:
+    if not w:
+        return False
+    if w in RAJASTHAN_LEXICON or w in GLYPH_VOCAB:
+        return True
+    if len(w) > 3 and w.endswith('ों'):
+        stem = w[:-2]
+        return stem in RAJASTHAN_LEXICON or stem in GLYPH_VOCAB
+    return False
+
+
+def glyph_repair(tok: str) -> str:
+    """
+    Inverse of the SEC font bug ('ी'->'ल', 'ो'/'ं'/'ू'->'प', plural 'ों'->'प'/'क').
+    Fewest substitutions first; a candidate is accepted ONLY if it is a known word,
+    so valid words are never mutated.
+    """
+    if not tok:
+        return ""
+    if tok in GLYPH_EXACT:
+        return GLYPH_EXACT[tok]
+    if len(tok) < 3 or is_known_word(tok):
+        return tok
+    chars = list(tok)
+    idx = [i for i, c in enumerate(chars)
+           if c in ('ल', 'प') or (c == 'क' and i == len(chars) - 1)]
+    if not idx or len(idx) > 8:
+        return tok
+    evals = [0]
+    for k in range(1, min(4, len(idx)) + 1):
+        found = []
+
+        def rec(start, left, cur):
+            if found or evals[0] > 20000:
+                return
+            if left == 0:
+                evals[0] += 1
+                cand = ''.join(cur)
+                if is_known_word(cand):
+                    found.append(cand)
+                return
+            for p in range(start, len(idx)):
+                pos = idx[p]
+                orig = cur[pos]
+                for r in _GLYPH_OPTS[orig]:
+                    cur[pos] = r
+                    rec(p + 1, left - 1, cur)
+                    cur[pos] = orig
+                    if found:
+                        return
+
+        rec(0, k, chars[:])
+        if found:
+            return found[0]
+    return tok
 
 def levenshtein_dist(s1: str, s2: str) -> int:
     """Computes Levenshtein edit distance between two strings"""
@@ -365,8 +450,12 @@ def levenshtein_dist(s1: str, s2: str) -> int:
 
 def strip_name_from_relative(voter_name: str, rel_name: str) -> str:
     """
-    Prevents voter name from repeating inside father/husband relative name.
-    Handles exact match, token prefix match, and fuzzy 1-2 char OCR typo variants.
+    Safely prevents voter name from repeating inside father/husband relative name.
+    CRITICAL SAFEGUARDS:
+    1. NEVER strips if the remainder is just a single suffix like 'राम', 'लाल', 'देवी', 'सिंह'.
+       (Preventing data corruption where 'सेवाराम', 'कालूराम' became just 'राम').
+    2. NEVER uses fuzzy 1-2 char edit distance between voter name and relative name,
+       because family members frequently have rhyming/similar names ('रेखा' & 'सेवाराम', 'कमली' & 'कालूराम').
     """
     if not voter_name or not rel_name:
         return rel_name or ""
@@ -374,54 +463,384 @@ def strip_name_from_relative(voter_name: str, rel_name: str) -> str:
     rn = rel_name.strip()
     if not rn or not vn:
         return rn
-    
-    # 1. Exact prefix match (e.g. voter="नगराम", rel="नगराम नखतराम" -> "नखतराम")
-    if rn.startswith(vn):
-        rn = rn[len(vn):].strip()
-        
-    # 2. Token prefix match (e.g. voter="राधा कुमारी", rel="राधा कुमारी पदमा राम" -> "पदमा राम")
+
+    HONORIFIC_SUFFIXES = {'राम', 'देवी', 'लाल', 'सिंह', 'कुमार', 'कुमारी', 'बाई', 'प्रसाद', 'दास', 'चंद', 'चन्द', 'नाथ', 'कंवर'}
+
+    # 1. Exact full voter name prefix match (e.g. voter="रेखा देवी", rel="रेखा देवी सेवाराम" -> "सेवाराम")
+    if rn.startswith(vn) and len(rn) > len(vn):
+        remainder = rn[len(vn):].strip()
+        if len(remainder) >= 3 and remainder not in HONORIFIC_SUFFIXES:
+            return remainder
+
+    # 2. Token match: Only if voter has 2+ words and rel begins with ALL of them
     vn_tokens = vn.split()
-    for tok in vn_tokens:
-        if len(tok) >= 2 and rn.startswith(tok):
-            rn = rn[len(tok):].strip()
-            
-    # 3. Fuzzy first-word match (e.g. voter="गंगा", relative="गगा रासुदेव" -> strip "गगा")
-    # or voter="रासुदेव", relative="रासुदा नखतराम" -> strip "रासुदा"
     rn_tokens = rn.split()
-    if len(rn_tokens) > 1 and len(vn_tokens) > 0:
-        first_r = rn_tokens[0]
-        first_v = vn_tokens[0]
-        if len(first_r) >= 2:
-            if first_r in vn or vn in first_r or levenshtein_dist(first_r, first_v) <= 2:
-                rn = " ".join(rn_tokens[1:]).strip()
+    if len(vn_tokens) >= 2 and len(rn_tokens) > len(vn_tokens):
+        if rn_tokens[:len(vn_tokens)] == vn_tokens:
+            remainder = " ".join(rn_tokens[len(vn_tokens):]).strip()
+            if len(remainder) >= 3 and remainder not in HONORIFIC_SUFFIXES:
+                return remainder
 
     return rn
+
+
+DEV_GLYPH_REPLACEMENTS = [
+    ('लललादेवल', 'लीला देवी'),
+    ('जमनादेवल', 'जमना देवी'),
+    ('मछादेवल', 'मच्छा देवी'),
+    ('ललला', 'लीला'),
+    ('गलविन्द', 'गोविन्द'),
+    ('गलतम', 'गौतम'),
+    ('भलखल', 'भीखी'),
+    ('खमलल', 'खीमी'),
+    ('गलमलल', 'गोमती'),
+    ('सणगारल', 'सणगारी'),
+    ('गुडल', 'गुडी'),
+    ('जलला', 'जीला'),
+    ('भलला', 'भीला'),
+    ('गलला', 'गोला'),
+    ('बदकी', 'बदामी'),
+    ('मदकी', 'मादकी'),
+    ('द्रलपतल', 'दलपत'),
+    ('कु़महेश्वरा', 'कामेश्वर'),
+    ('कौश्शलया', 'कौशल्या'),
+    ('लूमबा', 'लूंबा'),
+    ('आमबा', 'आंबा'),
+    ('बाबल', 'बाबू'),
+    ('सलना', 'सजना'),
+    # Female titles and names (CMap font 'ी' -> 'ल' glitches)
+    ('कुमारल', 'कुमारी'),
+    ('शान्तल', 'शान्ती'),
+    ('पार्वतल', 'पार्वती'),
+    ('भगवतल', 'भगवती'),
+    ('मापगल', 'मांगी'),
+    ('फूलल', 'फूली'),
+    ('लाछल', 'लाछी'),
+    ('खामलल', 'खामली'),
+    ('रपशनल', 'रोशनी'),
+    ('रानल', 'रानी'),
+    ('गलता', 'गीता'),
+    ('बदामल', 'बदामी'),
+    ('केसरल', 'केसरी'),
+    ('कमलल', 'कमली'),
+    ('ककलल', 'ककली'),
+    ('मूमलल', 'मूमली'),
+    ('छोटल', 'छोटी'),
+    ('धमप', 'धपू'),
+    # Muslim name font glitches ('खां' -> 'खाप', 'ी' -> 'ल')
+    ('नजलर खाप', 'नजीर खां'),
+    ('नजलर', 'नजीर'),
+    ('हासमखाप', 'हसम खां'),
+    ('रपशनखाप', 'रोशन खां'),
+    ('रपशन', 'रोशन'),
+    ('हासम', 'हसम'),
+    ('खाप', 'खां'),
+    # Consonant drops
+    ('पताप राम', 'प्रतापराम'),
+    ('पताप', 'प्रताप'),
+    ('आमबु देवी', 'आम्बु देवी'),
+    ('आमबु', 'आम्बु'),
+    ('पकाश', 'प्रकाश'),
+    ('पमोद', 'प्रमोद'),
+    ('पदीप', 'प्रदीप'),
+    ('पेम', 'प्रेम'),
+    ('पेरणा', 'प्रेरणा'),
+    # 'द्र' -> 'न्न' / conjunct fixes
+    ('जितेन्न', 'जितेन्द्र'),
+    ('देवेन्न', 'देवेन्द्र'),
+    ('सतेन्न', 'सतेन्द्र'),
+    ('नरेन्न', 'नरेन्द्र'),
+    ('राजेन्न', 'राजेन्द्र'),
+    ('महेन्न', 'महेन्द्र'),
+    ('गजेन्न', 'गजेन्द्र'),
+    ('सुरेन्न', 'सुरेन्द्र'),
+    ('धलरेन्न', 'धीरेन्द्र'),
+    ('धलरे', 'धीरे'),
+    ('इन्नजलत', 'इन्द्रजीत'),
+    ('इन्नजीत', 'इन्द्रजीत'),
+    ('चन्न', 'चन्द्र'),
+    # तंवर surname glitch ('तपवर' -> 'तंवर')
+    ('तपवर', 'तंवर'),
+    # Anushvar / bindi glitch ('प' -> 'ं')
+    ('अपजलि', 'अंजलि'),
+    ('अपजलल', 'अंजलि'),
+    ('सपतु', 'संतु'),
+    ('गुपजन', 'गुंजन'),
+    ('पुपजा', 'पुंजा'),
+    ('गपगल', 'गंगली'),
+    ('बजरपग', 'बजरंग'),
+    ('जलतेन्द्र', 'जितेन्द्र'),
+    ('बाबच', 'बाबू'),
+    ('बाबु', 'बाबू'),
+    ('खसम', 'खीम'),
+    ('खींम', 'खीम'),
+    ('अमलषा', 'अमीषा'),
+    ('उरमला', 'उर्मिला'),
+    ('विष्णच', 'विष्णु'),
+    ('सररता', 'सरिता'),
+    ('पवीण', 'प्रवीण'),
+    ('सलहन', 'सोहन'),
+    ('सलहनलाल', 'सोहनलाल'),
+    ('नरससग', 'नरसिंह'),
+    ('नरसींग', 'नरसिंह'),
+    ('खचशल', 'खुशी'),
+    ('सचन्दर', 'सुन्दर'),
+    ('खसमाराम', 'खीमाराम'),
+    ('शरमला', 'शर्मिला'),
+    ('नरमला', 'निर्मला'),
+    ('प्रकाशुन्द्र', 'प्रकाशचन्द्र'),
+    ('मनलज', 'मनोज'),
+    ('बीमनलज', 'बी. मनोज'),
+    ('बलमनलज', 'बी. मनोज'),
+    ('सरसवतल', 'सरस्वती'),
+    ('सरसवती', 'सरस्वती'),
+    ('क्रमानिता', 'अनिता'),
+    ('क्रमानिल', 'अनिल'),
+    ('क्रमारविंत', 'अरविन्द'),
+    ('क्रमानीता', 'अनीता'),
+    ('जलगा राम', 'जोगा राम'),
+    ('जलगा', 'जोगा'),
+    ('जलगाराम', 'जोगाराम'),
+    ('जलरा राम', 'जोरा राम'),
+    ('जलरा', 'जोरा'),
+    ('जलरारा', 'जोराराम'),
+    ('जलधा राम', 'जोधा राम'),
+    ('जलधा', 'जोधा'),
+    ('संतलष', 'संतोष'),
+    ('पवेश', 'भावेश'),
+    ('पवेश कुमार', 'भावेश कुमार'),
+]
+
+VILLAGE_REPLACEMENTS = [
+    ('पालल वालल का बास', 'पाली वालों का बास'),
+    ('पालल वालक का बास', 'पाली वालों का बास'),
+    ('पाली वालल का बास', 'पाली वालों का बास'),
+    ('पाली वालक का बास', 'पाली वालों का बास'),
+    ('पालल', 'पाली'),
+    ('रावला के पलछे', 'रावला के पीछे'),
+    ('पलछे', 'पीछे'),
+    ('भललल की ऊंचली बास', 'भीलों की ऊंचली बास'),
+    ('भीलल की ऊंचली बास', 'भीलों की ऊंचली बास'),
+    ('भललल', 'भीलों'),
+    ('भीलल', 'भीलों'),
+    ('रबाररयक का बास', 'रबारियों का बास'),
+    ('रबारियल का बास', 'रबारियों का बास'),
+    ('रबाररयल का बास', 'रबारियों का बास'),
+    ('रबाररयक', 'रबारियों'),
+    ('रबारियल', 'रबारियों'),
+    ('रबाररयल', 'रबारियों'),
+    ('मलयलल का बास', 'मोयलों का बास'),
+    ('मोयलल का बास', 'मोयलों का बास'),
+    ('मलयलल', 'मोयलों'),
+    ('मोयलल', 'मोयलों'),
+    ('भटवाडा मेगवालक का बास', 'भटवाड़ा मेघवालों का बास'),
+    ('भटवाडा मेघवालक का बास', 'भटवाड़ा मेघवालों का बास'),
+    ('भटवाडा', 'भटवाड़ा'),
+    ('मेगवालक का बास', 'मेघवालों का बास'),
+    ('मेघवालक का बास', 'मेघवालों का बास'),
+    ('मेगवालक', 'मेघवालों'),
+    ('मेघवालक', 'मेघवालों'),
+    ('वणिकक एवं ब्ररह्मण बसतल', 'वणिकों एवं ब्राह्मण बस्ती'),
+    ('वणिकक', 'वणिकों'),
+    ('ब्ररह्मण', 'ब्राह्मण'),
+    ('बसतल', 'बस्ती'),
+    ('ऊपचलल', 'ऊंचली'),
+    ('ऊपचली', 'ऊंचली'),
+    ('वालल का बास', 'वालों का बास'),
+    ('वालक का बास', 'वालों का बास'),
+    ('वालल', 'वालों'),
+    ('नगारचों का बास', 'नगारचियों का बास'),
+    ('नगारचो का बास', 'नगारचियों का बास'),
+    ('नगारचक का बास', 'नगारचियों का बास'),
+    ('नगारचल का बास', 'नगारचियों का बास'),
+]
+
+
+def descramble_sec_glyphs(w: str) -> str:
+    """De-scrambles Rajasthan SEC/ECI font glyph desynchronizations & common OCR errors"""
+    if not w:
+        return ""
+    s = w
+
+    # Direct authentic replacements using safe Devanagari Unicode boundaries
+    for target, rep in DEV_GLYPH_REPLACEMENTS:
+        pattern = rf'(?:(?<=[^\u0900-\u097F])|^){re.escape(target)}(?:(?=[^\u0900-\u097F])|$)'
+        s = re.sub(pattern, rep, s)
+
+    # Systematic 'द्र' -> 'न्न' / 'तपवर' -> 'तंवर' / 'चन्न' -> 'चन्द्र' regex rules
+    s = re.sub(r'([क-ह]े)न्न(?=[^\u0900-\u097F]|$)', r'\1न्द्र', s)
+    s = re.sub(r'चन्न(?=[^\u0900-\u097F]|$)', 'चन्द्र', s)
+    s = re.sub(r'इन्नजल[त|ल]?(?=[^\u0900-\u097F]|$)', 'इन्द्रजीत', s)
+    s = re.sub(r'धलरेन्न(?=[^\u0900-\u097F]|$)', 'धीरेन्द्र', s)
+    s = re.sub(r'धलरे', 'धीरे', s)
+    s = re.sub(r'तपवर', 'तंवर', s)
+
+    # Systematic glyph substitutions
+    s = re.sub(r'([क-ह])देवल(?=[^\u0900-\u097F]|$)', r'\1 देवी', s)
+    s = re.sub(r'([क-ह]+)\s*खाप(?=[^\u0900-\u097F]|$)', r'\1 खां', s)
+    s = re.sub(r'([क-ह])च([क-ह])', r'\1ु\2', s)
+    s = re.sub(r'([क-ह])चर्', r'\1ुर्', s)
+    s = re.sub(r'द[कलग]रल', 'देवी', s)
+    s = re.sub(r'दकर(?=\s|$)', 'देव', s)
+    s = re.sub(r'लरल(?=\s|$)', 'लाल', s)
+    s = re.sub(r'ररम(?=\s|$)', 'राम', s)
+    s = re.sub(r'कचमरर(?=\s|$)', 'कुमार', s)
+    s = re.sub(r'पकरश(?=\s|$)', 'प्रकाश', s)
+    s = re.sub(r'([क-ह])मरा(?=\s|$)', r'\1र्मा', s)
+    s = re.sub(r'([क-ह])मरर(?=\s|$)', r'\1र्मा', s)
+    s = re.sub(r'([ािीुूृेैोौं्])\1+', r'\1', s)
+    return s
 
 
 def fuzzy_lexicon_correct(name: str) -> str:
     """
     Pillar 5: Custom Lexicon & Levenshtein Correction
-    Replaces minor OCR typos (e.g. 'श्यान' -> 'श्याम', 'समितरा' -> 'सुमित्रा')
-    using fuzzy dictionary matching.
+    Replaces font glyph corruptions ('दचर्गा' -> 'दुर्गा', 'कचमार' -> 'कुमार')
+    and minor OCR typos using first-letter bucketing & Levenshtein distance.
+    CRITICAL SAFEGUARD: Clean, valid Hindi words are NEVER mutated into different names!
     """
     if not name:
         return ""
     words = name.split()
     corrected_words = []
-    for w in words:
+    for raw_w in words:
+        if raw_w in GLYPH_EXACT:
+            corrected_words.append(GLYPH_EXACT[raw_w])
+            continue
+        if raw_w in RAJASTHAN_LEXICON:
+            corrected_words.append(raw_w)
+            continue
+        w = descramble_sec_glyphs(raw_w)
         if w in RAJASTHAN_LEXICON:
             corrected_words.append(w)
             continue
+        _rep = glyph_repair(w)
+        if _rep != w:
+            corrected_words.append(_rep)
+            continue
+
+        # If w is a clean, well-formed Devanagari word without OCR artifacts,
+        # DO NOT mutate it to a different dictionary name just because distance is 1!
+        has_artifacts = bool(re.search(r'[0-9\d«»|“”….,~`!@#$%^&*()_+=\[\]{}?\/\\]', w)) or bool(re.match(r'^[ािीुूृेैोौं्]', w))
+        if not has_artifacts:
+            corrected_words.append(w)
+            continue
+
         best_match = w
         min_d = 99
+        first_char = w[0] if w else ''
         for candidate in RAJASTHAN_LEXICON:
-            if abs(len(w) - len(candidate)) <= 1:
+            if candidate.startswith(first_char) and abs(len(w) - len(candidate)) <= 1:
                 d = levenshtein_dist(w, candidate)
                 if d < min_d and d <= 1:
                     min_d = d
                     best_match = candidate
+                    if d == 1:
+                        break
         corrected_words.append(best_match)
     return " ".join(corrected_words)
+
+
+def clean_hindi_name(raw: str) -> str:
+    """
+    Cleans raw OCR / digital Hindi name tokens:
+    - Strips OCR artifacts, punctuation, labels (नाम, पिता, etc.)
+    - Normalizes duplicate matras
+    - De-scrambles SEC font glyphs (ी -> ल, खाप -> खां, etc.)
+    - Runs fuzzy lexicon correction against authentic Indian names
+    """
+    if not raw:
+        return ""
+    s = str(raw).strip()
+    s = re.sub(r'^(?:मतदाता\s*(?:का)?\s*)?नाम\s*[:ः\-\s]+', '', s)
+    s = re.sub(r'^(?:पिता|पति|माता|अन्य|पनत|नपतर)\s*(?:का)?\s*नाम\s*[:ः\-\s]+', '', s)
+    s = re.sub(r'[0-9\d«»|“”….,~`!@#$%^&*()_+=\[\]{}?\/\\]', '', s)
+    s = re.sub(r'^[_\-\s;:,|]+', '', s)
+    s = re.sub(r'[_\-\s;:,|]+$', '', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    if not s:
+        return ""
+    s = descramble_sec_glyphs(s)
+    s = fuzzy_lexicon_correct(s)
+    return s.strip()
+
+
+def clean_relative_info(raw: str) -> Tuple[str, str]:
+    """
+    Extracts and cleans relative name and relation type:
+    Detects 'पिता' / 'पति' / 'माता' / 'अन्य'
+    Returns (cleaned_relative_name, relation_type)
+    """
+    if not raw:
+        return "", "पिता"
+    s = str(raw).strip()
+    rel_type = "पिता"
+    m_rel = re.search(r'(पिता|पति|माता|अन्य|पनत|नपतर)\s*(?:का)?\s*नाम\s*[:ः\-\s]*(.+)', s)
+    if m_rel:
+        rt = m_rel.group(1)
+        if rt == 'पनत':
+            rt = 'पति'
+        elif rt == 'नपतर':
+            rt = 'पिता'
+        rel_type = rt
+        s = m_rel.group(2)
+    elif 'पति' in s or 'पनत' in s:
+        rel_type = 'पति'
+        s = re.sub(r'^(?:पति|पनत)\s*(?:का)?\s*नाम\s*[:ः\-\s]*', '', s)
+    elif 'माता' in s:
+        rel_type = 'माता'
+        s = re.sub(r'^माता\s*(?:का)?\s*नाम\s*[:ः\-\s]*', '', s)
+    elif 'पिता' in s or 'नपतर' in s:
+        rel_type = 'पिता'
+        s = re.sub(r'^(?:पिता|नपतर)\s*(?:का)?\s*नाम\s*[:ः\-\s]*', '', s)
+
+    cleaned_name = clean_hindi_name(s)
+    return cleaned_name, rel_type
+
+
+def clean_village_or_section_name(text: str) -> str:
+    """
+    De-scrambles and standardizes village/mohalla section names from corrupted CMap fonts:
+    - 'पालल वालल का बास' -> 'पाली वालों का बास'
+    - 'रावला के पलछे' -> 'रावला के पीछे'
+    - 'भीलल की ऊंचली बास' -> 'भीलों की ऊंचली बास'
+    - 'रबाररयक का बास' / 'रबारियल का बास' -> 'रबारियों का बास'
+    - 'मलयलल का बास' -> 'मोयलों का बास'
+    - 'भटवाडा मेगवालक का बास' -> 'भटवाड़ा मेघवालों का बास'
+    - 'वणिकक एवं ब्ररह्मण बसतल' -> 'वणिकों एवं ब्राह्मण बस्ती'
+    """
+    if not text:
+        return ""
+    s = str(text).strip()
+    if not s or s in ['-', '०', '0']:
+        return ""
+
+    for target, rep in VILLAGE_REPLACEMENTS:
+        pattern = rf'(?:(?<=[^\u0900-\u097F])|^){re.escape(target)}(?:(?=[^\u0900-\u097F])|$)'
+        s = re.sub(pattern, rep, s)
+
+    # General pattern: community plural ending with 'क' or 'ल' before 'का बास'
+    s = re.sub(r'([क-ह]+)क\s+का\s+बास', r'\1ों का बास', s)
+    s = re.sub(r'([क-ह]+)ल\s+का\s+बास', r'\1ों का बास', s)
+    s = re.sub(r'नगारचो[ं]?\s+का\s+बास', 'नगारचियों का बास', s)
+
+    # Token-level repair: plural/honorific context + generic inverse-glyph engine
+    toks = re.sub(r'\s+', ' ', s).strip().split(' ')
+    out = []
+    for i, t in enumerate(toks):
+        nxt = toks[i + 1] if i + 1 < len(toks) else ''
+        if t in GLYPH_EXACT:
+            out.append(GLYPH_EXACT[t])
+        elif is_known_word(t):
+            out.append(t)
+        elif nxt in ('का', 'की', 'के') and len(t) > 2 and t[-1] in ('प', 'क'):
+            out.append(t[:-1] + 'ों')
+        elif t == 'जल' and nxt.startswith('ढाण'):
+            out.append('जी')
+        else:
+            out.append(glyph_repair(t))
+    return re.sub(r'\s+', ' ', ' '.join(out)).strip()
+
 
 
 # =============================================================================
@@ -429,10 +848,7 @@ def fuzzy_lexicon_correct(name: str) -> str:
 # =============================================================================
 
 EPIC_PATTERN = re.compile(
-    r'(?:[A-Z]{2,4}\s*[\/\-]?\s*\d{6,8}'
-    r'|[A-Z]{2,3}\s*[\/\-]\s*\d{1,3}\s*[\/\-]\s*\d{1,3}\s*[\/\-]\s*\d{3,7}'
-    r'|[A-Z0-9]{3}[0-9OIBLSZG]{7}'
-    r'|[A-Z]{3}\s+[0-9]{7})',
+    r'(?:[A-Z0-9]{3}[0-9OIBLSZG]{7}|[A-Z]{2,4}[0-9]{6,8}|[A-Z]{2,3}\s*[\/\-]\s*\d{1,3}\s*[\/\-]\s*\d{1,3}\s*[\/\-]\s*\d{3,7})',
     re.IGNORECASE
 )
 
@@ -450,27 +866,13 @@ def normalize_numerals(s: str) -> str:
 
 
 def auto_correct_epic(raw_epic: str) -> str:
-    """Advanced Voter ID / EPIC auto-correction and normalization."""
+    """Voter ID auto-correction: O->0, I->1, B->8, etc."""
     if not raw_epic:
         return ""
     cleaned = re.sub(r'[^A-Za-z0-9\/\-]', '', raw_epic.strip().upper())
-    # Strip leading deletion markers if 11 chars
-    if len(cleaned) == 11 and cleaned[0] in ['E', 'S', 'R'] and cleaned[1:4].isalpha():
+    if len(cleaned) == 11 and cleaned[0] in ['E', 'S', 'R']:
         cleaned = cleaned[1:]
-
-    # State code slash format e.g. RJ/24/189/246543
-    if '/' in cleaned or '-' in cleaned:
-        parts = re.split(r'[\/\-]+', cleaned)
-        if len(parts) >= 3 and len(parts[0]) in (2, 3) and parts[0].isalpha():
-            letter_to_digit = {'O': '0', 'I': '1', 'L': '1', 'B': '8', 'S': '5', 'Z': '2', 'G': '6', 'D': '0', 'Q': '0'}
-            num_parts = []
-            for p in parts[1:]:
-                fixed_p = "".join(letter_to_digit.get(ch, ch) for ch in p)
-                num_parts.append(fixed_p)
-            return f"{parts[0]}/{'/'.join(num_parts)}"
-        return cleaned
-
-    # Standard 10-character alphanumeric: 3 letters + 7 digits
+        
     if len(cleaned) == 10:
         prefix = cleaned[:3]
         suffix = cleaned[3:]
@@ -480,16 +882,7 @@ def auto_correct_epic(raw_epic: str) -> str:
         s_fixed = "".join(letter_to_digit.get(ch, ch) for ch in suffix)
         if p_fixed.isalpha() and s_fixed.isdigit():
             return f"{p_fixed}{s_fixed}"
-
-    # 2 letters + 6-8 digits: e.g. RJ0123456
-    if 8 <= len(cleaned) <= 10 and cleaned[:2].isalpha():
-        prefix = cleaned[:2]
-        suffix = cleaned[2:]
-        letter_to_digit = {'O': '0', 'I': '1', 'L': '1', 'B': '8', 'S': '5', 'Z': '2', 'G': '6', 'D': '0', 'Q': '0'}
-        s_fixed = "".join(letter_to_digit.get(ch, ch) for ch in suffix)
-        if s_fixed.isdigit():
-            return f"{prefix}{s_fixed}"
-
+            
     return cleaned
 
 
@@ -659,8 +1052,18 @@ SEC_TYPO_MAP = {
     r'^परोहित\b': 'पुरोहित',
     r'^म॒केश\b': 'मुकेश',
     r'^तेज\s*प्रकास\b': 'तेज प्रकाश',
-    r'^ददुर्गाराम\b': 'दुर्गाराम',
-    r'^ज़गदीश\b': 'जगदीश'
+    r'^ज़गदीश\b': 'जगदीश',
+    r'^तिनेश\b': 'दिनेश',
+    r'^तुर्गा\b': 'दुर्गा',
+    r'^टुर्गा\b': 'दुर्गा',
+    r'^तेवी\b': 'देवी',
+    r'^तास\b': 'दास',
+    r'^ररकू\b|^रकू\b|^ररकु\b': 'रिंकू',
+    r'^तिलीप\b': 'दिलीप',
+    r'^टीपक\b': 'दीपक',
+    r'^टेवेन्द्र\b': 'देवेन्द्र',
+    r'^तशरथ\b': 'दशरथ',
+    r'^तामोदर\b': 'दामोदर'
 }
 
 ADMIN_WORDS_BLACKLIST = [
@@ -687,176 +1090,8 @@ SEC_RAJASTHAN_DICTIONARY = {
     'करलपररम': 'कालूराम', 'अमरर ररम': 'अमरा राम', 'चजनरररम': 'चेनाराम',
     'जसपदर': 'यशोदा', 'मपतललरल': 'मोतीलाल', 'टलकप': 'टीकू', 'आसमररम': 'आसाराम',
     'आरतल': 'आरती', 'दकरललरल': 'देवीलाल', 'गणपत ररम': 'गणपत राम', 'अमरतल': 'अमृती',
-    'हसतच': 'हस्तू', 'आमबरररम': 'आंबाराम', 'गयरधनररम': 'गोवर्धनराम', 'अलसलररम': 'अचलाराम',
-    'अलसल': 'अचला', 'इननय': 'इन्दो', 'नकनरररम': 'नेनाराम', 'लकरत': 'लीली', 'बजरदकरल': 'बाधुदेवी',
-    'गणपतलरल': 'गणपतलाल', 'रमकश कचमरर': 'रमेश कुमार', 'मरपगल लरल': 'मांगीलाल',
-    'नरररजणररम': 'नारायणराम', 'गजरररम': 'गजाराम', 'उदरररम': 'उदाराम',
-    'नरररसणररम': 'नारायणराम', 'लमणरररम': 'लूणाराम', 'मनयहर': 'मनोहर', 'सररप ररम': 'स्वरूप राम',
-    'जसररज': 'जसराज', 'अमकर': 'अमरा', 'मदन': 'मदन', 'मनपज': 'मनोज',
-    'दलपत ररम': 'दलपत राम', 'दलपतररम': 'दलपतराम', 'दलपत': 'दलपत', 'गणपत': 'गणपत',
-    'हकमरररम': 'हेमाराम', 'हकमर': 'हेमा', 'दचगरर': 'दुर्गा', 'दचगर': 'दुर्गा',
-    'शजतरनर ररम': 'शिवकरण राम', 'शजतरनरररम': 'शिवकरणराम', 'शजतरनररम': 'शिवकरणराम', 'शजतरनर': 'शिवकरण',
-    'ददनकश कचमरर': 'दिनेश कुमार', 'ददनकश': 'दिनेश', 'शरपनत': 'शान्ति', 'दचगरश': 'दुर्गेश',
-    'लकमण ररम': 'लक्ष्मण राम', 'लकमणररम': 'लक्ष्मणराम', 'लक मण ररम': 'लक्ष्मण राम', 'लकमण': 'लक्ष्मण',
-    'लकमल': 'लक्ष्मी', 'कककबप': 'केकू', 'कमब': 'कमू', 'करलब': 'कालू', 'जसब': 'जसू',
-    'मपजब': 'मंजू', 'मयटब': 'मोटू', 'मरपगब': 'मांगी', 'ररजब': 'राजू', 'सगब': 'सगू',
-    'सपतब': 'संतो', 'सयनब': 'सोनू', 'ररजय': 'राजू', 'सररई': 'सवाई', 'नगरधर': 'गिरधर',
-    'ननतकश': 'नितेश', 'पमयद': 'प्रमोद', 'मकघररल': 'मेघवाल', 'घनशजरम': 'घनश्याम',
-    'कयशलजर': 'कौशल्या', 'कसतचर': 'कस्तूर', 'कसतबर': 'कस्तूर', 'खचशरल': 'खुशाल',
-    'चजनर': 'चेना', 'चरनदर': 'चन्द्र', 'चरपदर': 'चन्द्र', 'जगरधररल': 'गिरधारीलाल',
-    'जतलपकर': 'त्रिलोक', 'जलरण': 'जीवन', 'जलरन': 'जीवन', 'जशररज': 'जसराज',
-    'टलकबररम': 'टीकूराम', 'दललदकरल': 'डली देवी', 'धयकलरररम': 'धोकलराम',
-    'नगरधररलररम': 'गिरधारीलालराम', 'नतलयकरररम': 'त्रिलोकराम', 'नरररजण': 'नारायण',
-    'नशरनरररजण': 'शिवनारायण', 'पजरगरररम': 'पुखराजराम', 'बकरलसरलररम': 'बेरीसालराम',
-    'बलरबलररम': 'बलबीरराम', 'भभजरररम': 'भोजाराम', 'मकहररज': 'मेघराज',
-    'मचलतरनरररम': 'मुलतानराम', 'मचलरररम': 'मूलाराम', 'मबलरररम': 'मूलाराम',
-    'रचपगरररम': 'रूघाराम', 'ररजकनन': 'राजेन्द्र', 'रररमलररम': 'रामूराम',
-    'लखरररम': 'लाखाराम', 'लरखरररम': 'लाखाराम', 'लचणरररम': 'लूणाराम', 'लबणरररम': 'लूणाराम',
-    'लरधबररम': 'लाधूराम', 'शजरम': 'श्याम', 'सचरजरनरररम': 'सूरजराम', 'सबरजरनरररम': 'सूरजराम',
-    'हरलररम': 'हरीराम', 'हलरर': 'हीरा', 'हलररररम': 'हीरालालराम',
-    'शपकररररम': 'शंकराराम', 'जचगतरररम': 'जुगतराम', 'चकनरररम': 'चेनाराम', 'अचलरररम': 'अचलाराम',
-    'रषरर': 'ईश्वर', 'दमगरश': 'दिनेश', 'जपसमष': 'पीयूष',
-    'लरल': 'लाल', 'ररम': 'राम', 'दकरल': 'देवी', 'दकर': 'देव', 'बरई': 'बाई',
-    'कपरर': 'कंवर', 'नसह': 'सिंह', 'पकरश': 'प्रकाश', 'चचदर': 'चंद्र',
-    'सलतर': 'सीता', 'सपगलतर': 'संगीता', 'ककलरश': 'कैलाश', 'सयहनलरल': 'सोहनलाल',
-    'दकशनलरल': 'किशनलाल', 'ककसरररम': 'केसाराम', 'छकलरररम': 'छैलाराम',
-    'मरलल': 'माली', 'पकमलल': 'कमला', 'मपगलर': 'मंगला', 'मपगरररम': 'मगाराम',
-    'खखररररम': 'खींयाराम', 'परलररजर': 'परिहार', 'ररजकश': 'राजेश', 'महकनद': 'महेंद्र',
-    'हलररलरल': 'हीरालाल', 'बरबचलरल': 'बाबूलाल', 'नशरपकरश': 'शिवप्रकाश',
-    'सचनमतरर': 'सुमित्रा', 'शमरर': 'शर्मा', 'नजततद': 'जितेंद्र',
-    'झबमर': 'झूमर', 'सचरकश': 'सुरेश', 'नतसच': 'नत्थू', 'हरखरररम': 'हरखाराम',
-    'बपसललरल': 'बंसीलाल', 'जकठरररम': 'जेठाराम', 'हकमलतर': 'हेमलता',
-    'तकज': 'तेज', 'अनचपर': 'अनुपा', 'सचतरर': 'सुतार', 'ककसबररम': 'केसूराम',
-    'उषर': 'उषा', 'पपचर': 'पांचू', 'ककषनररम': 'कृष्णाराम', 'ककषनर': 'कृष्णा',
-    'मनकष': 'मनीष', 'मनयज': 'मनोज', 'सपजय': 'संजय', 'नदपक': 'दीपक',
-    'पपम': 'पूनम', 'रखम': 'रेखा', 'भपरर': 'भंवरा', 'महनपल': 'महिपाल',
-    'हसतमल': 'हस्तीमल', 'ररमदनल': 'रामदीन', 'भगररथरम': 'भागीरथराम'
+    'हसतच': 'हस्तू', 'आमबरररम': 'आंबाराम'
 }
-
-def decode_sec_rajasthan(text: str) -> str:
-    if not text:
-        return ""
-    s = re.sub(r'^(?:[नहकम]\s+)+', '', text.strip())
-    
-    # Direct dictionary substitutions sorted by length descending
-    for k, v in sorted(SEC_RAJASTHAN_DICTIONARY.items(), key=lambda x: -len(x[0])):
-        if k in s:
-            s = s.replace(k, v)
-            
-    s = s.replace('लरल', 'लाल').replace('ररम', 'राम').replace('दकरल', 'देवी')
-    s = s.replace('कचमरर', 'कुमार').replace('कममरर', 'कुमार')
-    
-    s = re.sub(r'([क-ह])य([क-ह])', r'\1ो\2', s)
-    s = re.sub(r'([क-ह])क([क-ह])', r'\1े\2', s)
-    s = re.sub(r'([क-ह])च([क-ह])', r'\1ु\2', s)
-    s = re.sub(r'([क-ह])ब(?=\s|$|[क-ह])', r'\1ू', s)
-    
-    s = s.replace('रर', 'रा')
-    
-    s = re.sub(r'ा+', 'ा', s)
-    s = re.sub(r'ी+', 'ी', s)
-    s = re.sub(r'े+', 'े', s)
-    s = re.sub(r'ू+', 'ू', s)
-    s = re.sub(r'ु+', 'ु', s)
-    return re.sub(r'\s+', ' ', s).strip()
-
-def clean_hindi_name(raw: str) -> str:
-    """Strips labels, watermarks, and applies typography corrections (F4)"""
-    if not raw:
-        return ""
-    n = decode_sec_rajasthan(raw.strip())
-    
-    # Reject administrative / geographical words mistakenly captured as voter names
-    if any(w in n for w in ADMIN_WORDS_BLACKLIST):
-        return ""
-
-    # Strip invisible joiners (ZWJ/ZWNJ)
-    n = n.replace('\u200d', '').replace('\u200c', '')
-    # Standardize stray nuktas
-    n = n.replace('क़', 'क').replace('ख़', 'ख').replace('ग़', 'ग')
-
-    if 'नाम' in n:
-        parts = n.split('नाम')
-        n = parts[-1].strip()
-    if 'नरम' in n:
-        parts = n.split('नरम')
-        n = parts[-1].strip()
-        
-    n = re.sub(r'^[;:ः\-\.\s\/\|_]+', '', n)
-    n = re.sub(r'^(?:नरम|नाम|नाम्|नाभ|नाव|त्ताम|त्ाम|ताम|मा|ज्ञाञ्|ज्ञा|साभ|जप्र|ज्ञात)[:ः\.\-\s]+', '', n)
-    n = re.sub(r'^(?:D\s*E\s*L\s*E\s*T\s*E\s*D|DELETED|ELETED)\s*', '', n, flags=re.IGNORECASE)
-    if '_' in n:
-        n = n.replace('_', '')
-    n = re.sub(r'[a-zA-Z]+', ' ', n)
-    n = re.sub(r'[\d\u0966-\u096F]+', ' ', n)
-    n = re.sub(r'[^\u0900-\u097F\s]', ' ', n)
-    n = re.sub(r'\s+', ' ', n).strip()
-    
-    for _ in range(2):
-        n = re.sub(r'\s+(?:का\s*नरक|नरक|कफ|कस|कर|डा|ए|झारे|औडे|हा|फ्रे|दल|डी|ईडी|लेटे|डिलीट|शा|हि|हू|हु|का|के|की|ज|ब|त|क|घ|छ|झ|ण|प|फ|य|र|ल|व|श|ष|स|ह)$', '', n).strip()
-    
-    # Strip leading stray stamp marks (e.g. 'नी जवरी' -> 'जवरी', 'वि रमेश' -> 'रमेश')
-    n = re.sub(r'^(?:नी|वि|सं|डी|ए|ई|नं|म)\s+', '', n).strip()
-
-    # Fix broken leading matras (e.g. 'ुर्गाराम' -> 'दुर्गाराम')
-    n = re.sub(r'^[\u0941\u0942]र्गा', 'दुर्गा', n)
-    # Deduplicate repeated nuktas and normalize
-    n = re.sub(r'[\u093C]+', '\u093C', n)
-    n = re.sub(r'जांगिड़\u093C+', 'जांगिड़', n)
-
-    for pat, repl in SEC_TYPO_MAP.items():
-        pat_fixed = pat.replace(r'\b', r'(?!\S)')
-        n = re.sub(pat_fixed, repl, n)
-        
-    # Apply Pillar 5 Lexicon fuzzy correction
-    n = fuzzy_lexicon_correct(n)
-    n = re.sub(r'[\u093C]+', '\u093C', n)
-    n = re.sub(r'जांगिड़\u093C+', 'जांगिड़', n)
-    
-    banned = {
-        'मतदाता', 'कलेण्डर', 'विधानसभा', 'निर्वाचक', 'नामावली', 'वार्ड', 'अनुभाग',
-        'प्रारूप', 'मतदान', 'हस्ताक्षर', 'फोटो', 'उपलब्ध', 'संख्या', 'भाग', 'सूची',
-        'ग्राम', 'नगर', 'मकान', 'गृह', 'आयु', 'उम्र', 'लिंग', 'पिता', 'पति', 'माता',
-        'अन्य', 'नातेदार', 'नाम', 'नरम', 'ग्रामपंचायत', 'पंचायत', 'जिलापरिषद', 'ओसियाँ', 'प्रतापनगर'
-    }
-    if n in banned or len(n) < 2:
-        return ""
-    return n
-
-
-def clean_relative_info(raw: str) -> Tuple[str, str]:
-    """Cleans relative name and relation type (F4)"""
-    if not raw:
-        return "", "पिता"
-    s = raw.strip()
-    s = s.replace('\u200d', '').replace('\u200c', '')
-    s = s.replace('क़', 'क').replace('ख़', 'ख').replace('ग़', 'ग')
-
-    rel_type = "पिता"
-    if "पति" in s or "पनत" in s:
-        rel_type = "पति"
-    elif "माता" in s or "मरतर" in s:
-        rel_type = "माता"
-    elif "पिता" in s or "नपतर" in s:
-        rel_type = "पिता"
-    
-    s = re.sub(r'^(?:पिता|पति|माता|अन्य|नपतर|पनत|मरतर)?\s*(?:का|के|की|कर)?\s*(?:नाम|नरम|ताम|नाम्|माम|नाव|त्ताम|त्ाम|ज्ञाञ्|साभ|जप्र)[:ः\.\-\s]*', '', s)
-    if "नाम" in s:
-        s = s.split("नाम")[-1]
-    if "नरम" in s:
-        s = s.split("नरम")[-1]
-    
-    s = re.sub(r'^[;:ः\-\.\s\/\|_]+', '', s)
-    s = re.sub(r'^(?:D\s*E\s*L\s*E\s*T\s*E\s*D|DELETED|ELETED)\s*', '', s, flags=re.IGNORECASE)
-    s = re.sub(r'\s+(?:D\s*E\s*L\s*E\s*T\s*E\s*D|DELETED|ELETED|कफ|कस|कर|डा|ए|झारे|औडे|हा|फ्रे|दल)$', '', s, flags=re.IGNORECASE)
-    if '_' in s:
-        s = s.replace('_', '')
-    s = re.sub(r'[^\u0900-\u097F\s]', ' ', s)
-    s = re.sub(r'\s+', ' ', s).strip()
-    
-    s = clean_hindi_name(s)
-    return s, rel_type
-
 
 def clean_house_no(raw: str) -> str:
     """
@@ -888,7 +1123,7 @@ def clean_house_no(raw: str) -> str:
     s = re.split(r'\b(?:आयु|उम्र|आजच|आय|लिंग|जेंडर|सलग|sex|फोटो|उपलब्ध|deleted|विलोपित)\b', s, flags=re.IGNORECASE)[0].strip()
 
     # Strip prefixes and labels
-    s = re.sub(r'^(?:मकान|संख्या|मकरन|मकारन|सपखजर|गृह|वार्ड|ward|house|no|room|flat|ft|at|et|Fy|Ik|iad|है|हे|मिका|पु|Nha|AY|म\.?\s*सं\.?|म\.?\s*क्र\.?|H\.?\s*No\.?)[:ः\.\-\s]*', '', s, flags=re.IGNORECASE).strip()
+    s = re.sub(r'^(?:मकान|संख्या|मकरन|मकारन|सपखजर|गृह|वार्ड|ward|house|no|room|flat|ft|at|et|Fy|Ik|iad|है|हे|मिका|पु|Nha|AY|म\.?\s*सं\.?|म\.?\s*क्र\.?|H\.?\s*No\.?)[ :ः\.\-\s]*', '', s, flags=re.IGNORECASE).strip()
     s = re.sub(r'(?:मकान|संख्या|मकरन|मकारन|सपखजर|गृह|ward|house|no)+', '', s, flags=re.IGNORECASE).strip()
     
     # Strip unwanted symbols except valid house separators / and -
@@ -929,7 +1164,6 @@ def clean_house_no(raw: str) -> str:
 
     # If no numbers were found, do NOT return random Hindi words/landmarks as house numbers!
     return "-"
-
 
 def ensemble_ocr_line(preprocessed_img: np.ndarray) -> str:
     """
@@ -1004,7 +1238,7 @@ DEV_VOWELS = {
 }
 
 DEV_MATRAS = {
-    'ा': 'a', 'ि': 'i', 'ी': 'i', 'ु': 'u', 'ू': 'u',
+    'ा': 'a', 'ि': 'i', 'ी': 'ee', 'ु': 'u', 'ू': 'oo',
     'ृ': 'ri', 'े': 'e', 'ै': 'ai', 'ो': 'o', 'ौ': 'au',
     'ं': 'n', 'ँ': 'n', 'ः': 'h', 'ॅ': 'e', 'ॉ': 'o'
 }
@@ -1026,14 +1260,8 @@ COMPOUND_NAME_SUFFIXES = [
     ('राम', ' Ram'), ('लाल', ' Lal'), ('कुमार', ' Kumar'), ('कुमारी', ' Kumari'),
     ('सिंह', ' Singh'), ('कंवर', ' Kanwar'), ('देवी', ' Devi'), ('बाई', ' Bai'),
     ('प्रसाद', ' Prasad'), ('प्रकाश', ' Prakash'), ('चंद', ' Chand'), ('चन्द', ' Chand'),
-    ('चन्द्र', ' Chandra'), ('नारायण', ' Narayan'), ('नाथ', ' Nath'), ('दास', ' Das'),
-    ('शंकर', ' Shankar'), ('दीन', ' Deen'), ('भान', ' Bhan'), ('जीत', ' Jeet'),
-    ('पाल', ' Pal'), ('देव', ' Dev'), ('राज', ' Raj'), ('धर', ' Dhar'),
-    ('वल्लभ', ' Vallabh'), ('दत्त', ' Dutt'), ('वती', ' Vati'), ('मती', ' Mati'),
-    ('प्रिया', ' Priya'), ('रानी', ' Rani')
+    ('नाथ', ' Nath'), ('दास', ' Das'), ('शंकर', ' Shanker'), ('चन्द्र', ' Chandra')
 ]
-
-CONJUNCT_RETENTION_ENDINGS = ('न्द्र', 'त्र', 'प्र', 'क्र', 'ग्र', 'श्र', 'क्ल', 'ज्ञ', 'त्य', 'र्य', 'व्य', 'ष्ठ', 'स्थ', 'द्ध')
 
 def transliterate_token(token: str) -> str:
     if not token:
@@ -1045,8 +1273,6 @@ def transliterate_token(token: str) -> str:
     n = len(chars)
     res = []
     i = 0
-    retains_final_a = any(token.endswith(conj) for conj in CONJUNCT_RETENTION_ENDINGS)
-
     while i < n:
         c = chars[i]
         if i + 1 < n and chars[i+1] == '़':
@@ -1057,50 +1283,21 @@ def transliterate_token(token: str) -> str:
             res.append(DEV_VOWELS[c].lower() if res else DEV_VOWELS[c])
         elif c in DEV_CONSONANTS:
             base = DEV_CONSONANTS[c]
-            next_c = chars[i+1] if i + 1 < n else None
-            next_next = chars[i+2] if i + 2 < n else None
-            is_conjunct_member = (i >= 2 and chars[i-1] == '्')
-
-            if c == 'व':
-                if i > 0 and chars[i-1] in ('ं', 'न', 'स', 'र', 'ल', 'ई', 'त'):
-                    base = 'w'
-
-            if next_c == '्':
+            if i + 1 < n and chars[i+1] == '्':
                 res.append(base)
                 i += 1
-            elif next_c in DEV_MATRAS:
+            elif i + 1 < n and chars[i+1] in DEV_MATRAS:
                 res.append(base)
-                matra = next_c
+                matra = chars[i+1]
                 if matra in ('ं', 'ँ'):
-                    if next_next and next_next in ('प', 'फ', 'ब', 'भ', 'म'):
-                        res.append('am')
-                    else:
-                        res.append('an')
-                elif matra == 'ी':
-                    if i <= 1 and (next_next is None or next_next in DEV_CONSONANTS):
-                        res.append('ee')
-                    else:
-                        res.append('i')
-                elif matra == 'ू':
-                    if i <= 1 and (next_next is None or next_next in DEV_CONSONANTS):
-                        res.append('oo')
-                    else:
-                        res.append('u')
+                    res.append('an')
                 else:
                     res.append(DEV_MATRAS[matra])
                 i += 1
+            elif i + 1 < n and chars[i+1] in DEV_CONSONANTS:
+                res.append(base + 'a')
             elif i == n - 1:
-                if retains_final_a and i >= 2 and chars[i-1] == '्':
-                    res.append(base + 'a')
-                else:
-                    res.append(base)
-            elif next_c in DEV_CONSONANTS:
-                if is_conjunct_member:
-                    res.append(base + 'a')
-                elif i > 0 and (next_next == '्' or (next_next in DEV_MATRAS)):
-                    res.append(base)
-                else:
-                    res.append(base + 'a')
+                res.append(base)
             else:
                 res.append(base + 'a')
         elif c in DEV_MATRAS:
@@ -1197,7 +1394,9 @@ def extract_page_sections(page: Any, p_idx: int) -> List[Tuple[float, str, str]]
                     pass
             
             if not sec_hi:
-                sec_hi = clean_hindi_name(txt) or txt
+                sec_hi = clean_village_or_section_name(clean_hindi_name(txt) or txt)
+            else:
+                sec_hi = clean_village_or_section_name(sec_hi)
                 
             sec_en = KNOWN_SECTION_TRANSLATIONS.get(sec_hi)
             if not sec_en:
@@ -1269,30 +1468,15 @@ def ocr_single_page(args_tuple: Tuple[str, int]) -> Tuple[int, List[Dict[str, An
 
     page_sections = extract_page_sections(page, p_idx)
 
-    # Multi-Anchor Card Discovery with Header Pairing
+    # Multi-Anchor Card Discovery
     words = page.get_text('words')
-    raw_epics_on_page = []
-    for w in words:
-        txt = w[4].strip()
-        ep_m = EPIC_PATTERN.search(txt)
-        if ep_m:
-            raw_epics_on_page.append((auto_correct_epic(ep_m.group(0)), w[0], w[1], w[2], w[3]))
-
-    col_targets = [46.7, 49.1, 53.2, 55.0, 220.2, 222.6, 226.8, 229.0, 393.6, 396.1, 400.2, 402.0]
     serial_anchors = []
     for w in words:
         txt = w[4].strip()
-        if txt.isdigit() and 130 < w[1] < page_height - 35:
+        if txt.isdigit() and 130 < w[1] < page_height - 40:
             val = int(txt)
-            if 1 <= val <= 2500 and val != 2026:
-                if any(abs(w[0] - col) < 7.0 for col in col_targets):
-                    paired_epic = None
-                    for ep_str, ex0, ey0, ex1, ey1 in raw_epics_on_page:
-                        if abs(w[1] - ey0) < 8.0 and 0 < (ex0 - w[0]) < 140.0:
-                            paired_epic = ep_str
-                            break
-                    if paired_epic or len(raw_epics_on_page) == 0:
-                        serial_anchors.append((val, w[0], w[1], paired_epic))
+            if 1 <= val <= 2500 and any(abs(w[0] - col) < 20.0 for col in [49.1, 222.6, 396.1, 55.0, 229.0, 402.0]):
+                serial_anchors.append((val, w[0], w[1]))
 
     card_boxes = []
     if len(serial_anchors) >= 3:
@@ -1300,15 +1484,13 @@ def ocr_single_page(args_tuple: Tuple[str, int]) -> Tuple[int, List[Dict[str, An
         for s in serial_anchors:
             if s[0] not in seen_s:
                 seen_s[s[0]] = s
-            elif s[3] and not seen_s[s[0]][3]:
-                seen_s[s[0]] = s
         sorted_serials = sorted(seen_s.values(), key=lambda s: s[0])
-        for val, sx, sy, paired_epic in sorted_serials:
+        for val, sx, sy in sorted_serials:
             col_x0 = max(0.0, sx - 22.0)
             col_x1 = min(page_width, col_x0 + 175.0)
             card_y0 = max(0.0, sy - 10.0)
-            card_y1 = min(page_height, card_y0 + 72.35)
-            card_boxes.append((fitz.Rect(col_x0, card_y0, col_x1, card_y1), val, None, paired_epic))
+            card_y1 = min(page_height, card_y0 + 89.0)
+            card_boxes.append((fitz.Rect(col_x0, card_y0, col_x1, card_y1), val, None))
     else:
         # Fallback 2: Photo boxes and embedded images
         photo_rects = page.search_for('Photo is')
@@ -1346,16 +1528,11 @@ def ocr_single_page(args_tuple: Tuple[str, int]) -> Tuple[int, List[Dict[str, An
                     col_x1 = min(page_width, p_r.x0 + 61.0)
                     card_y0 = max(0.0, p_r.y0 - 15.0)
                     card_y1 = min(page_height, card_y0 + 72.35)
-                card_boxes.append((fitz.Rect(col_x0, card_y0, col_x1, card_y1), None, p_r, None))
+                card_boxes.append((fitz.Rect(col_x0, card_y0, col_x1, card_y1), None, p_r))
 
     page_cards = []
 
-    for item in card_boxes:
-        card_rect = item[0]
-        preset_serial = item[1]
-        p_r = item[2]
-        paired_epic = item[3] if len(item) > 3 else None
-
+    for card_rect, preset_serial, p_r in card_boxes:
         active_sec_hi, active_sec_en = "", ""
         for sec_y, s_hi, s_en in page_sections:
             if card_rect.y0 >= sec_y - 20:
@@ -1366,40 +1543,20 @@ def ocr_single_page(args_tuple: Tuple[str, int]) -> Tuple[int, List[Dict[str, An
         card_y0 = card_rect.y0
         card_y1 = card_rect.y1
 
-        # Digital words stream (RAW, UNTOUCHED)
+        # Digital words stream
         c_words = page.get_text('words', clip=card_rect)
-        raw_words_text = [w[4] for w in c_words]
-        raw_card_text_str = ' '.join(raw_words_text)
-
-        # 1. EPIC extraction strictly from RAW text stream FIRST before font conversion
-        epic_m = EPIC_PATTERN.search(raw_card_text_str)
-        raw_epic = epic_m.group(0) if epic_m else ''
-        extracted_epic = auto_correct_epic(raw_epic) if raw_epic else (paired_epic or '')
-
-        # Fallback 1b: Dedicated OCR on top header strip if digital EPIC is missing
-        if not extracted_epic:
-            try:
-                hdr_rect = fitz.Rect(col_x0 + 25.0, max(0.0, card_y0 - 2.0), min(page_width, col_x1), min(page_height, card_y0 + 22.0))
-                pix_hdr = page.get_pixmap(matrix=fitz.Matrix(3.0, 3.0), clip=hdr_rect)
-                img_hdr = Image.frombytes('RGB', [pix_hdr.width, pix_hdr.height], pix_hdr.samples)
-                tess_hdr = pytesseract.image_to_string(
-                    img_hdr, 
-                    lang='eng', 
-                    config='--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-'
-                ).strip()
-                ep_hdr_m = EPIC_PATTERN.search(tess_hdr)
-                if ep_hdr_m:
-                    extracted_epic = auto_correct_epic(ep_hdr_m.group(0))
-            except Exception:
-                pass
-
-        # 2. Only NOW convert card text for Hindi linguistic extraction if legacy font
+        words_text = [w[4] for w in c_words]
+        card_text_str = ' '.join(words_text)
+        
+        # Pillar 7: Convert card text if legacy font
         if is_page_legacy:
-            card_text_str = auto_convert_text(raw_card_text_str, page_font_names)
-            words_text = [auto_convert_text(w, page_font_names) for w in raw_words_text]
-        else:
-            card_text_str = raw_card_text_str
-            words_text = raw_words_text
+            card_text_str = auto_convert_text(card_text_str, page_font_names)
+            words_text = [auto_convert_text(w, page_font_names) for w in words_text]
+
+        # 1. EPIC
+        epic_m = EPIC_PATTERN.search(card_text_str)
+        raw_epic = epic_m.group(0) if epic_m else ''
+        extracted_epic = auto_correct_epic(raw_epic)
 
         # 2. Serial Number & Status
         card_serial = preset_serial
@@ -1436,11 +1593,37 @@ def ocr_single_page(args_tuple: Tuple[str, int]) -> Tuple[int, List[Dict[str, An
                     age_raw = words_text[i+1]
                 if i + 2 < len(words_text):
                     gender_raw = words_text[i+2]
-            if any(k in w for k in ['सपखसर', 'मकरन', 'संख्या', 'मकान']):
-                if i + 1 < len(words_text):
-                    h_str = words_text[i+1].strip()
-                    if h_str and not h_str.startswith('Photo') and not any(h_str.startswith(p) for p in ['XII', 'JCR', 'RJ', 'UP', 'DL', 'MP', 'GJ', 'HR']):
-                        house_no = clean_house_no(h_str)
+            if any(k in w for k in ['सपखसर', 'मकरन', 'मकान', 'गृह', 'संख्या', 'म.सं', 'म.नं', 'म०', 'house', 'h.no']) and not house_no:
+                # Check if digits are attached inside w itself (e.g. 'मकान:15', 'मकरन12', 'म.सं.4')
+                w_num = re.sub(r'^(?:सपखसर|मकरन|मकान|गृह|संख्या|म\.?\s*सं\.?|म\.?\s*नं\.?|म०\s*सं०?|म०\s*नं०?|house|h\.no)[:ः\.\-\s]*', '', w, flags=re.I).strip()
+                if w_num and (any(ch.isdigit() for ch in w_num) or any(ch in '०१२३४५६७८९' for ch in w_num)):
+                    res_w = clean_house_no(w_num)
+                    if res_w and res_w not in ['-', '०', '0', '00']:
+                        house_no = res_w
+                if not house_no:
+                    cand_tokens = []
+                    for ahead in range(1, min(6, len(words_text) - i)):
+                        tk = words_text[i + ahead].strip()
+                        if not tk:
+                            continue
+                        if any(l in tk for l in ['आयु', 'आजच', 'उम्र', 'लिंग', 'Sex', 'Photo', 'RJ/', 'VOTER']):
+                            break
+                        if tk in ['संख्या', 'सपखसर', 'सपखजर', 'मकरन', 'मकान', 'गृह', 'नंबर', 'नं', 'नं.', 'सं', 'सं.', 'क्र', 'क्र.', ':', '-']:
+                            continue
+                        cand_tokens.append(tk)
+                        if any(ch.isdigit() for ch in tk) or any(ch in '०१२३४५६७८९' for ch in tk):
+                            if ahead + 1 < min(6, len(words_text) - i):
+                                next_tk = words_text[i + ahead + 1].strip()
+                                if next_tk in ['/', '-'] or (len(next_tk) <= 2 and next_tk in ['क', 'ख', 'ग', 'घ', 'A', 'B', 'C']):
+                                    cand_tokens.append(next_tk)
+                                    if ahead + 2 < min(6, len(words_text) - i) and next_tk in ['/', '-']:
+                                        cand_tokens.append(words_text[i + ahead + 2].strip())
+                            break
+                    if cand_tokens:
+                        combined = ''.join(cand_tokens)
+                        res = clean_house_no(combined)
+                        if res and res not in ['-', '०', '0', '00']:
+                            house_no = res
 
         # 4. Relation type
         rel_type = 'पिता'
@@ -1531,8 +1714,12 @@ def ocr_single_page(args_tuple: Tuple[str, int]) -> Tuple[int, List[Dict[str, An
                 pass
 
         # House No fallback
-        if not house_no or house_no in ['-', '०']:
-            house_no = tess_parsed['house'] or ''
+        if not house_no or house_no in ['-', '०', '0', '00']:
+            t_house = tess_parsed.get('house') or ''
+            if t_house and t_house not in ['-', '०', '0', '00']:
+                house_no = t_house
+            else:
+                house_no = '-'
 
         # Age and Gender fallbacks
         if not age_raw and tess_parsed['age']:
@@ -1556,7 +1743,7 @@ def ocr_single_page(args_tuple: Tuple[str, int]) -> Tuple[int, List[Dict[str, An
             "gender": gender,
             "status": status,
             "villageName": active_sec_en,
-            "villageNameHi": active_sec_hi
+            "villageNameHi": clean_village_or_section_name(active_sec_hi)
         }
 
         # PILLAR 8: Groq AI Fallback first, then OpenRouter (ONLY IF DATA IS MISSING OR CORRUPTED AND ENABLED)
@@ -1626,7 +1813,7 @@ def ocr_single_page(args_tuple: Tuple[str, int]) -> Tuple[int, List[Dict[str, An
                             "gender": gender,
                             "status": parsed['status'],
                             "villageName": active_sec_en,
-                            "villageNameHi": active_sec_hi
+                            "villageNameHi": clean_village_or_section_name(active_sec_hi)
                         })
                 except Exception:
                     pass
@@ -1781,7 +1968,7 @@ def process_pdf_to_excel(pdf_path: str, excel_path: str, ward_no: str = "", boot
     pdf_font_names = extract_font_names_from_pdf(pdf_path)
     detected_encoding = detect_encoding_type(raw_sample_text, pdf_font_names)
     
-    print(f"VijaySetu Font Engine: Detected encoding = '{detected_encoding}'")
+    print(f"MatdataPortal Font Engine: Detected encoding = '{detected_encoding}'")
     if pdf_font_names:
         print(f"  Embedded fonts: {', '.join(pdf_font_names[:10])}")
     
@@ -1826,9 +2013,9 @@ def process_pdf_to_excel(pdf_path: str, excel_path: str, ward_no: str = "", boot
 
     # Rule F2: Extract supplement deletions before processing main cards
     supp_deletions = extract_supplement_deletions(pdf_path)
-    print(f"VijaySetu Supplement Engine: Loaded {len(supp_deletions)} clean deletion records for cross-reconciliation.")
+    print(f"MatdataPortal Supplement Engine: Loaded {len(supp_deletions)} clean deletion records for cross-reconciliation.")
 
-    print(f"VijaySetu 7-Pillar Engine: Processing {total_pages} pages using {max_workers} parallel workers...")
+    print(f"MatdataPortal 7-Pillar Engine: Processing {total_pages} pages using {max_workers} parallel workers...")
     tasks = [(pdf_path, p_idx) for p_idx in range(total_pages)]
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1839,10 +2026,10 @@ def process_pdf_to_excel(pdf_path: str, excel_path: str, ward_no: str = "", boot
     final_records = []
     voters_template_records = []
     seen_serials = set()
-    seen_epics = set()
+    seen_epics_index = {}
     serial_counter = 1
 
-    current_village_hi = cover_village_hi or "मुख्य गाँव"
+    current_village_hi = clean_village_or_section_name(cover_village_hi) or "मुख्य गाँव"
     current_village_en = cover_village_en or "Main Village"
     
     for item in results:
@@ -1875,20 +2062,12 @@ def process_pdf_to_excel(pdf_path: str, excel_path: str, ward_no: str = "", boot
                 continue
 
             if not epic:
-                # Check if there is an unused authentic EPIC from raw page extraction
-                unused_page_epics = [ep for ep in page_epics if ep and ep not in seen_epics]
-                if unused_page_epics and not is_pure_supp_del_page:
-                    epic = unused_page_epics[0]
-                    seen_epics.add(epic)
-                elif (card.get("relativeNameHi") and len(card.get("relativeNameHi")) >= 2) or card.get("serialNo"):
-                    if is_pure_supp_del_page:
-                        epic = ""
-                    else:
-                        epic = f"VOTER_W{ward_no or '1'}_P{booth_no or '1'}_{card_serial}"
+                if (card.get("relativeNameHi") and len(card.get("relativeNameHi")) >= 2) or card.get("serialNo"):
+                    epic = f"VOTER_{card_serial}"
                 else:
                     continue
-            else:
-                seen_epics.add(epic)
+
+            epic = str(epic).strip().upper()
 
             rel_name = card.get("relativeNameHi", "")
             rel_name = strip_name_from_relative(voter_name, rel_name)
@@ -1898,12 +2077,12 @@ def process_pdf_to_excel(pdf_path: str, excel_path: str, ward_no: str = "", boot
             gender = card.get("gender", "पुरुष")
             status = card.get("status", "Active")
 
-            # Dynamic village tracking per card
+            # Dynamic village tracking per card with font de-scrambler
             if card.get("villageNameHi"):
-                current_village_hi = card["villageNameHi"]
+                current_village_hi = clean_village_or_section_name(card["villageNameHi"])
             if card.get("villageName"):
                 current_village_en = card["villageName"]
-            v_hi = card.get("villageNameHi") or current_village_hi
+            v_hi = clean_village_or_section_name(card.get("villageNameHi") or current_village_hi)
             v_en = card.get("villageName") or current_village_en
 
             name_en = card.get("nameEn") or transliterate_hindi(voter_name)
@@ -1912,6 +2091,7 @@ def process_pdf_to_excel(pdf_path: str, excel_path: str, ward_no: str = "", boot
             # Rule F2: DELETED-STAMP reconciliation
             is_deleted_card = (
                 status == "Deleted"
+                or is_pure_supp_del_page
                 or f"{card_serial}_{epic}" in supp_deletions
                 or f"epic_{epic}" in supp_deletions
                 or (card_serial and f"ser_{card_serial}" in supp_deletions and supp_deletions[f"ser_{card_serial}"]["epic"] == epic)
@@ -1948,21 +2128,55 @@ def process_pdf_to_excel(pdf_path: str, excel_path: str, ward_no: str = "", boot
                     if not age or age == "-":
                         age = ""
                         needs_review = True
-                    if not house or house == "-":
+                    if not house or house in ['-', '०', '0', '00']:
                         house = "-"
                         needs_review = True
             else:
                 # Rule F5: Active voter validation
                 if not age or age == "-" or (isinstance(age, int) and (age < 18 or age > 125)):
                     needs_review = True
-                if not house or house == "-":
+                if not house or house in ['-', '०', '0', '00']:
+                    house = "-"
                     needs_review = True
 
             # Rule F4: Stray characters in name
             if '_' in voter_name or '्' == voter_name[-1:]:
                 needs_review = True
 
+            # DEDUPLICATION: Reconcile duplicate EPIC numbers (Fake / Duplicate Voters)
+            if epic and not epic.startswith("VOTER_") and epic in seen_epics_index:
+                existing_idx = seen_epics_index[epic]
+                # If either this entry is marked deleted or from supplement deletions:
+                if is_deleted_card or status == "Deleted":
+                    final_records[existing_idx]["स्थिति"] = "Deleted"
+
+                # Check if existing record had corrupted OCR font artifacts (e.g. ended in 'ल' or 'खाप')
+                # and this new card has a cleaner, non-corrupted spelling:
+                curr_name = final_records[existing_idx]["मतदाता का नाम"]
+                if (curr_name.endswith('ल') or 'खाप' in curr_name or 'कुमारल' in curr_name) and not (voter_name.endswith('ल') or 'खाप' in voter_name):
+                    final_records[existing_idx]["मतदाता का नाम"] = voter_name
+                    final_records[existing_idx]["मतदाता का नाम (English)"] = name_en
+                    if existing_idx < len(voters_template_records):
+                        voters_template_records[existing_idx]["Name (Hindi)"] = voter_name
+                        voters_template_records[existing_idx]["Name (English)"] = name_en
+
+                # Also fill in house/age if existing was empty/invalid
+                if (not final_records[existing_idx]["मकान संख्या"] or final_records[existing_idx]["मकान संख्या"] == "-") and house and house != "-":
+                    final_records[existing_idx]["मकान संख्या"] = house
+                    if existing_idx < len(voters_template_records):
+                        voters_template_records[existing_idx]["House No"] = house
+                        voters_template_records[existing_idx]["House No (Hindi)"] = house
+                if (not final_records[existing_idx]["आयु"] or final_records[existing_idx]["आयु"] == "-") and age and age != "-":
+                    final_records[existing_idx]["आयु"] = age
+                    if existing_idx < len(voters_template_records):
+                        voters_template_records[existing_idx]["Age"] = age
+
+                # Do NOT append a duplicate row for the same EPIC!
+                continue
+
             seen_serials.add(card_serial)
+            if epic and not epic.startswith("VOTER_"):
+                seen_epics_index[epic] = len(final_records)
 
             final_records.append({
                 "क्रमांक": card_serial,
