@@ -36,6 +36,26 @@ except Exception:
 # 1. MASTER GLYPH-HASH DICTIONARY (Universal SEC Rajasthan Voter PDFs)
 # ==============================================================================
 GLYPH_HASH_TO_HINDI = {
+    '6a9f4514f0': 'े',
+    '9d5ada6621': '॰',
+    '4bce9c127c': 'स्',
+    'baaf1d7916': 'ढ',
+    '18fddc2776': 'म',
+    '86782ba084': 'ष',
+    '38f27e4136': 'ण',
+    '1d2373702b': '७',
+    'e53c827ede': '४',
+    '953c0272b5': '७',
+    'ac98804239': '८',
+    'da02ead334': 'र',
+    'fbab6a5c7d': 'ड',
+    'aed3c8356d': 'ष',
+    '6dbc02a698': 'ड़',
+    '6dd3799fc0': 'य',
+    '8998e0b3c3': 'ष',
+    '6b4c1fb76e': 'ज',
+    '5a4bc3c51b': 'ड',
+    '6a9f4514f0': 'े',
     '0171bec762': 'ड',
     '027103c065': 'ड़',
     '046b405861': 'ऊ',
@@ -683,11 +703,52 @@ ENDRA_CONJUNCT_RULES = [
     (re.compile(r'(^|[^\u0900-\u097F])(हर[ंन]?[्]?द्र)([^\u0900-\u097F]|$)'), r'\g<1>हरेन्द्र\g<3>')
 ]
 
+
+def clean_village_or_section_name(text: str) -> str:
+    if not text:
+        return ""
+    s = str(text).strip()
+    if not s or s in ['-', '०', '0']:
+        return ""
+
+    RAMDEORA_VIL_REPLACEMENTS = [
+        ('मुसलमानक की ढाणी', 'मुसलमानों की ढाणी'),
+        ('भीलक का बास', 'भीलों का बास'),
+        ('प्रजापतक का बास', 'प्रजापतों का बास'),
+        ('नाईयक का बास', 'नाइयों का बास'),
+        ('सुथारक का बास', 'सुथारों का बास'),
+        ('सुथारो का बास', 'सुथारों का बास'),
+        ('सुथारो की ढाणी', 'सुथारों की ढाणी'),
+        ('मेगवालो की ढाणी', 'मेघवालों की ढाणी'),
+        ('मेगवाल बांदरो का बास', 'मेघवाल बांदरा का बास'),
+        ('देशान्तरो का बास', 'देशान्तरों का बास'),
+        ('कुष कोलोनी', 'कुष्ठ कॉलोनी'),
+        ('ट्यूबैल रोड़', 'ट्यूबवेल रोड'),
+        ('ट्यूबैल रोड', 'ट्यूबवेल रोड'),
+        ('तलाब के पिछे', 'तालाब के पीछे'),
+        ('कुमहारों', 'कुम्हारों'),
+        ('कुणडलियो', 'कुंडलियों'),
+        ('कुण्डलियो', 'कुंडलियों'),
+        ('नाई जी ढाणी', 'नाइयों की ढाणी'),
+        ('बिडद सिंह', 'बिड़द सिंह'),
+        ('ररमद मररर', 'रामदेवरा'),
+        ('ररमदमररर', 'रामदेवरा'),
+        ('मररर', 'मावा'),
+    ]
+
+    for target, rep in RAMDEORA_VIL_REPLACEMENTS:
+        s = re.sub(rf'(?:(?<=[^ऀ-ॿ])|^){re.escape(target)}(?:(?=[^ऀ-ॿ])|$)', rep, s)
+
+    s = re.sub(r'([क-ह]+)[कलो]\s+का\s+बास', r'\g<1>ों का बास', s)
+    s = re.sub(r'([क-ह]+)[कलो]\s+की\s+ढाणी', r'\g<1>ों की ढाणी', s)
+
+    return re.sub(r'\s+', ' ', s).strip()
+
 def normalize_electoral_hindi(text: str) -> str:
     """Applies universal government electoral lexicon normalization rules."""
     if not text:
         return ""
-    s = text.strip()
+    s = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text).strip()
     
     # Structural ligature and repeating character cleanups
     s = re.sub(r'श्वव', 'श्व', s)
@@ -698,6 +759,13 @@ def normalize_electoral_hindi(text: str) -> str:
     s = re.sub(r'([ािीुूृेैोौं्])\1+', r'\1', s)
     s = re.sub(r'मांग्[ााुू]+राम', 'मांगूराम', s)
     s = re.sub(r'पं[ठेेप]+ सिंह', 'प्रताप सिंह', s)
+    s = re.sub(r'([क-ह]े)न्न(?=[^ऀ-ॿ]|$)', r'\g<1>न्द्र', s)
+    s = re.sub(r'\bदे\s*न्द्र\b', 'देवेन्द्र', s)
+    s = re.sub(r'\bदे\s*वे[न्]+[द्रन]+\b', 'देवेन्द्र', s)
+    s = re.sub(r'(?:^|\s)दररया(?=\s|$)', ' दरिया ', s)
+    s = re.sub(r'(?:^|\s)खखव(?=\s|$)', ' खींव ', s)
+    s = re.sub(r'(?:^|\s)उममेदा(?=\s|$)', ' उम्मेदा ', s)
+    s = re.sub(r'(?:^|\s)झ[बच][मप]बर(?=\s|$)', ' झूमर ', s)
 
     # 1. Universal -ेन्द्र / -ेंद्र and conjunct half-matra fixes
     for regex, rep in ENDRA_CONJUNCT_RULES:
@@ -979,7 +1047,16 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
         for mark, s_num in matches:
             deletions_serials.add(int(s_num))
 
-    current_village_hi = "कुम्हारों की ढाणी, मावा"
+    # Extract primary Village / GP from cover page dynamically
+    current_village_hi = "रामदेवरा"
+    if len(reader.pages) > 0:
+        c_txt = reader.pages[0].extract_text() or ""
+        gp_match = re.search(r'(?:गरमपपचरजत|ग्राम\s*पंचायत)\s*[:ः\-]?\s*([^\n\r]+)', c_txt)
+
+        if gp_match:
+            gp_clean = clean_village_or_section_name(decode_hashes_to_hindi([ch_hash.get(ord(ch), '') for ch in gp_match.group(1)])) if 'ch_hash' in locals() else "रामदेवरा"
+            if gp_clean and len(gp_clean) >= 3:
+                current_village_hi = gp_clean
     VALID_VILLAGE_KEYWORDS = ['ढाणी', 'बास', 'बस्ती', 'रामदेवरा', 'मावा', 'रोड', 'स्टेशन', 'स्कूल', 'मोहल्ला', 'ग्राम']
     INVALID_VILLAGE_KEYWORDS = ['लिंग', 'आयु', 'पुरुष', 'स्त्री', 'विधानसभा', 'निर्वाचक', 'भाग', 'घटक', 'संख्या']
 
@@ -1080,7 +1157,7 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                             if ',' in txt or txt == ' ':
                                 hdr_hashes.append('SPACE')
                 if hdr_hashes:
-                    cand_v = decode_hashes_to_hindi(hdr_hashes)
+                    cand_v = clean_village_or_section_name(decode_hashes_to_hindi(hdr_hashes))
                     if len(cand_v) > 4:
                         if any(vk in cand_v for vk in VALID_VILLAGE_KEYWORDS) and not any(ik in cand_v for ik in INVALID_VILLAGE_KEYWORDS):
                             current_village_hi = cand_v
