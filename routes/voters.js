@@ -425,6 +425,68 @@ router.get('/panchayats-summary', verifyToken, requireModule('voters', 'communit
   }
 });
 
+// Get data quality / issues summary for current organization
+router.get('/issues-summary', verifyToken, requireModule('voters'), async (req, res) => {
+  try {
+    const query = addVoterAccess(req);
+    const ward = req.query.ward;
+    if (typeof ward === 'string' && ward.trim()) {
+      applyWardFilter(query, ward);
+    }
+
+    const [totalVoters, missingEpicCount, missingHouseCount, deletedCount, missingPhoneCount] = await Promise.all([
+      Voter.countDocuments(query),
+      Voter.countDocuments({
+        ...query,
+        $or: [
+          { epic: { $regex: '^VOTER_' } },
+          { epic: { $regex: '^UNREADABLE_' } },
+          { epic: '' },
+          { epic: null },
+          { epic: '-' }
+        ]
+      }),
+      Voter.countDocuments({
+        ...query,
+        $or: [
+          { houseNo: '' },
+          { houseNo: null },
+          { houseNo: '-' },
+          { houseNo: '0' },
+          { houseNo: '00' }
+        ]
+      }),
+      Voter.countDocuments({
+        ...query,
+        status: { $in: ['Deleted', 'विलोपित'] }
+      }),
+      Voter.countDocuments({
+        ...query,
+        $or: [
+          { mobileNo: '' },
+          { mobileNo: null },
+          { mobileNo: '-' }
+        ]
+      })
+    ]);
+
+    const totalIssues = missingEpicCount + missingHouseCount + deletedCount;
+
+    res.json({
+      totalVoters,
+      missingEpicCount,
+      missingHouseCount,
+      deletedCount,
+      missingPhoneCount,
+      totalIssues,
+      hasIssues: totalIssues > 0
+    });
+  } catch (err) {
+    console.error('Issues summary failed:', err.message);
+    res.status(500).json({ message: 'Issues summary could not be loaded.' });
+  }
+});
+
 // High-performance Paginated Households for Family Voter Slips (Cached 60s)
 router.get('/households', verifyToken, requireModule('voters', 'community'), async (req, res) => {
   try {
@@ -569,7 +631,7 @@ router.get('/households', verifyToken, requireModule('voters', 'community'), asy
 // Get all voters (with search & pagination)
 router.get('/', verifyToken, requireModule('voters', 'community', 'workers', 'migrants'), async (req, res) => {
   try {
-    const { search, relative, ward, panchayat, part, house, isMigrant, supportStatus, caste, assignedWorker, status, gender } = req.query;
+    const { search, relative, ward, panchayat, part, house, isMigrant, supportStatus, caste, assignedWorker, status, gender, issue } = req.query;
     const query = addVoterAccess(req);
 
     if (typeof search === 'string' && search.trim()) {
@@ -688,6 +750,67 @@ router.get('/', verifyToken, requireModule('voters', 'community', 'workers', 'mi
       } else {
         const genderRegex = safeRegex(g);
         if (genderRegex) query.gender = genderRegex;
+      }
+    }
+
+    if (typeof issue === 'string' && issue.trim()) {
+      const issueKey = issue.trim();
+      let issueFilter = null;
+
+      if (issueKey === 'missing_epic') {
+        issueFilter = {
+          $or: [
+            { epic: { $regex: '^VOTER_' } },
+            { epic: { $regex: '^UNREADABLE_' } },
+            { epic: '' },
+            { epic: null },
+            { epic: '-' }
+          ]
+        };
+      } else if (issueKey === 'missing_house') {
+        issueFilter = {
+          $or: [
+            { houseNo: '' },
+            { houseNo: null },
+            { houseNo: '-' },
+            { houseNo: '0' },
+            { houseNo: '00' }
+          ]
+        };
+      } else if (issueKey === 'missing_phone') {
+        issueFilter = {
+          $or: [
+            { mobileNo: '' },
+            { mobileNo: null },
+            { mobileNo: '-' }
+          ]
+        };
+      } else if (issueKey === 'deleted') {
+        query.status = { $in: ['Deleted', 'विलोपित'] };
+      } else if (issueKey === 'any_issue') {
+        issueFilter = {
+          $or: [
+            { epic: { $regex: '^VOTER_' } },
+            { epic: '' },
+            { epic: null },
+            { epic: '-' },
+            { houseNo: '' },
+            { houseNo: null },
+            { houseNo: '-' },
+            { status: { $in: ['Deleted', 'विलोपित'] } }
+          ]
+        };
+      }
+
+      if (issueFilter) {
+        if (query.$and) {
+          query.$and.push(issueFilter);
+        } else if (query.$or) {
+          query.$and = [{ $or: query.$or }, issueFilter];
+          delete query.$or;
+        } else {
+          Object.assign(query, issueFilter);
+        }
       }
     }
 
