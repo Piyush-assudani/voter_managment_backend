@@ -516,155 +516,132 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
     let response;
     let lastError = null;
 
-    // 1. If we have uploaded image or have a public image URL, try sending template with image header or image message
-    if (mediaId || publicImageUrl) {
-      const imageParam = mediaId ? { id: mediaId } : { link: publicImageUrl };
-      const imageTemplateName = (templateName === 'voter_slip_card_hi' || !templateName || templateName === 'voter_slip_dispatch')
-        ? 'voter_slip_card_hi'
-        : templateName;
-      if (imageTemplateName) {
-        try {
-          const templatePayload = {
-            messaging_product: 'whatsapp',
-            recipient_type: 'individual',
-            to: recipientPhone,
-            type: 'template',
-            template: {
-              name: imageTemplateName,
-              language: { code: 'hi' },
-              components: [
-                {
-                  type: 'header',
-                  parameters: [
-                    { type: 'image', image: imageParam }
-                  ]
-                },
-                {
-                  type: 'body',
-                  parameters: imageTemplateName === 'voter_slip_card_hi'
-                    ? [
-                        { type: 'text', text: voterName },
-                        { type: 'text', text: voterName },
-                        { type: 'text', text: displayEpic },
-                        { type: 'text', text: ward },
-                        { type: 'text', text: part },
-                        { type: 'text', text: String(serial || '—') },
-                        { type: 'text', text: boothName }
-                      ]
-                    : [
-                        { type: 'text', text: voterName },
-                        { type: 'text', text: displayEpic },
-                        { type: 'text', text: ward },
-                        { type: 'text', text: part },
-                        { type: 'text', text: String(serial || '—') },
-                        { type: 'text', text: boothName }
-                      ]
-                }
-              ]
-            }
-          };
-          response = await axios.post(
-            `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}/messages`,
-            templatePayload,
-            { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 12000 }
-          );
-        } catch (tmplErr) {
-          console.warn('Template with image header failed, falling back:', tmplErr.response?.data?.error?.message || tmplErr.message);
-          lastError = tmplErr;
+    // Helper to build 6 standard parameters for voter slip templates
+    const buildTemplateParams = (tmplName) => {
+      if (tmplName === 'voter_slip_card_hi') {
+        return [
+          { type: 'text', text: voterName },
+          { type: 'text', text: voterName },
+          { type: 'text', text: displayEpic },
+          { type: 'text', text: String(ward || '—') },
+          { type: 'text', text: String(part || '—') },
+          { type: 'text', text: String(serial || '—') },
+          { type: 'text', text: String(boothName || '—') }
+        ];
+      }
+      return [
+        { type: 'text', text: voterName },
+        { type: 'text', text: displayEpic },
+        { type: 'text', text: String(ward || '—') },
+        { type: 'text', text: String(part || '—') },
+        { type: 'text', text: String(serial || '—') },
+        { type: 'text', text: String(boothName || '—') }
+      ];
+    };
+
+    // Candidate template names to try in order of priority (Approved Utility first, then Marketing)
+    const templatesToTry = [
+      templateName,
+      'voter_slip_dispatch',
+      'voter_slip_info',
+      'voter_slip_notice'
+    ].filter((t, idx, arr) => Boolean(t) && arr.indexOf(t) === idx);
+
+    // 1. Try sending via Meta Approved Template
+    for (const curTemplate of templatesToTry) {
+      if (response) break;
+      try {
+        const templatePayload = {
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: recipientPhone,
+          type: 'template',
+          template: {
+            name: curTemplate,
+            language: { code: 'hi' },
+            components: [
+              {
+                type: 'body',
+                parameters: buildTemplateParams(curTemplate)
+              }
+            ]
+          }
+        };
+
+        const res = await axios.post(
+          `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}/messages`,
+          templatePayload,
+          { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+        );
+        if (res.data?.messages?.[0]?.id) {
+          response = res;
+          console.log(`✅ Meta WhatsApp template [${curTemplate}] delivered successfully to ${recipientPhone}`);
+          break;
         }
+      } catch (tmplErr) {
+        lastError = tmplErr;
+        console.warn(`Template [${curTemplate}] attempt failed:`, tmplErr.response?.data?.error?.message || tmplErr.message);
+      }
+    }
+
+    // 2. If templates didn't go through, check if 24-hr customer service window is open
+    if (!response) {
+      let isWindowOpen = false;
+      try {
+        const last10 = recipientPhone.slice(-10);
+        const inbound = await SlipDispatch.findOne({
+          recipientPhone: new RegExp(last10),
+          windowExpiresAt: { $gt: new Date() }
+        }).lean();
+        if (inbound) {
+          isWindowOpen = true;
+        }
+      } catch (e) {
+        // ignore
       }
 
-      if (!response) {
-        try {
-          // Send direct image message with caption
+      if (isWindowOpen) {
+        // Customer initiated contact in last 24h: freeform media/text is permitted
+        if (mediaId || publicImageUrl) {
+          const imageParam = mediaId ? { id: mediaId } : { link: publicImageUrl };
+          try {
+            response = await axios.post(
+              `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}/messages`,
+              {
+                messaging_product: 'whatsapp',
+                recipient_type: 'individual',
+                to: recipientPhone,
+                type: 'image',
+                image: { ...imageParam, caption: messageText }
+              },
+              { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 12000 }
+            );
+          } catch (imgErr) {
+            console.warn('Direct image in 24h window failed, trying text:', imgErr.response?.data || imgErr.message);
+          }
+        }
+
+        if (!response) {
+          const fullText = publicImageUrl ? `${messageText}\n\n🖼️ *डिजिटल पर्ची फोटो:*\n${publicImageUrl}` : messageText;
           response = await axios.post(
             `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}/messages`,
             {
               messaging_product: 'whatsapp',
               recipient_type: 'individual',
               to: recipientPhone,
-              type: 'image',
-              image: {
-                ...imageParam,
-                caption: messageText
-              }
+              type: 'text',
+              text: { preview_url: true, body: fullText }
             },
             { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 12000 }
           );
-        } catch (imgMsgErr) {
-          console.warn('Direct image message send failed (likely 24h window), falling back to standard template:', imgMsgErr.response?.data?.error?.message || imgMsgErr.message);
-          lastError = imgMsgErr;
         }
-      }
-    }
-
-    // 2. Fallback to standard approved template or text message
-    if (!response) {
-      let messagePayload;
-      if (templateName) {
-        messagePayload = {
-          messaging_product: 'whatsapp',
-          recipient_type: 'individual',
-          to: recipientPhone,
-          type: 'template',
-          template: {
-            name: templateName,
-            language: { code: 'hi' },
-            components: [
-              {
-                type: 'body',
-                parameters: templateName === 'voter_slip_card_hi'
-                  ? [
-                      { type: 'text', text: voterName },
-                      { type: 'text', text: voterName },
-                      { type: 'text', text: displayEpic },
-                      { type: 'text', text: ward },
-                      { type: 'text', text: part },
-                      { type: 'text', text: String(serial || '—') },
-                      { type: 'text', text: boothName }
-                    ]
-                  : [
-                      { type: 'text', text: voterName },
-                      { type: 'text', text: displayEpic },
-                      { type: 'text', text: ward },
-                      { type: 'text', text: part },
-                      { type: 'text', text: String(serial || '—') },
-                      { type: 'text', text: boothName }
-                    ]
-              }
-            ]
-          }
-        };
-      }
-      if (templateName) {
-        try {
-          response = await axios.post(
-            `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}/messages`,
-            messagePayload,
-            { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 12000 }
-          );
-        } catch (tmplErr) {
-          console.warn('Template send failed, falling back to direct text message:', tmplErr.response?.data?.error?.message || tmplErr.message);
-          lastError = tmplErr;
-        }
-      }
-
-      if (!response) {
-        const fullText = publicImageUrl
-          ? `${messageText}\n\n🖼️ *डिजिटल पर्ची फोटो:*\n${publicImageUrl}`
-          : messageText;
-        const textPayload = {
-          messaging_product: 'whatsapp',
-          recipient_type: 'individual',
-          to: recipientPhone,
-          type: 'text',
-          text: { preview_url: true, body: fullText }
-        };
-        response = await axios.post(
-          `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}/messages`,
-          textPayload,
-          { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 12000 }
-        );
+      } else {
+        // 24-hr window is CLOSED and all Meta templates failed!
+        // DO NOT silently send plain text (which Meta accepts in HTTP 200 queue but drops permanently).
+        const metaErrMsg = lastError?.response?.data?.error?.message || lastError?.message || 'Meta टेम्पलेट उपलब्ध नहीं या अस्वीकृत है।';
+        const err = new Error(`Meta 24-घंटे नीति: नए मतदाता को संदेश केवल Meta Approved Template द्वारा ही भेजा जा सकता है। (${metaErrMsg})`);
+        err.isTemplatePending = true;
+        throw err;
       }
     }
 
@@ -690,14 +667,18 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
     const errorCode = err.response?.data?.error?.code;
 
     // Helpful error messages for common Meta codes
-    if (errorCode === 131030) {
-      errorDetail = `Meta टेस्ट मोड प्रतिबंध (#131030): नंबर (+91 ${recipientPhone.slice(-10)}) Meta Developer Console की Allowed Numbers लिस्ट में नहीं है। कृपया Meta Developers Console में जाकर यह नंबर जोड़ें या फिर "डायरेक्ट WhatsApp भेजें" (1-Click) का उपयोग करें।`;
+    if (err.isTemplatePending) {
+      errorDetail = err.message;
+    } else if (errorCode === 131030) {
+      errorDetail = `Meta टेस्ट मोड प्रतिबंध (#131030): नंबर (+91 ${recipientPhone?.slice(-10)}) Meta Developer Console की Allowed Numbers लिस्ट में नहीं है। कृपया Meta Developers Console में जाकर यह नंबर जोड़ें या फिर "डायरेक्ट WhatsApp भेजें" (1-Click) का उपयोग करें।`;
     } else if (errorCode === 131047) {
-      errorDetail = 'Meta 24-घंटे नीति: मतदाता ने पहले मैसेज नहीं किया है। इस नंबर पर संदेश भेजने के लिए Meta Approved Template आवश्यक है।';
+      errorDetail = 'Meta 24-घंटे नीति (#131047): मतदाता ने पिछले 24 घंटे में आपके नंबर पर मैसेज नहीं किया है। इस नंबर पर सीधा संदेश भेजने के लिए Meta Approved Template आवश्यक है। कृपया "डायरेक्ट WhatsApp" बटन का उपयोग करें।';
     } else if (errorCode === 131026) {
       errorDetail = 'मोबाइल नंबर Meta WhatsApp पर मौजूद नहीं है या अमान्य है।';
     } else if (errorCode === 190) {
       errorDetail = 'Meta Access Token एक्सपायर हो गया है। कृपया नया Access Token दर्ज करें।';
+    } else if (errorCode === 132001) {
+      errorDetail = 'Meta Template नहीं मिला या समीक्षाधीन है। कृपया Meta Approved Template चुनें या "डायरेक्ट WhatsApp" का प्रयोग करें।';
     }
 
     if (dispatchId) {
@@ -712,7 +693,9 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
     }
 
     console.error('WhatsApp send error:', err.response?.data || err.message);
-    res.status(metaAccepted ? 207 : 500).json({
+    res.status(err.isTemplatePending ? 422 : (metaAccepted ? 207 : 500)).json({
+      success: false,
+      isTemplatePending: Boolean(err.isTemplatePending),
       message: errorDetail || 'Meta Graph API से WhatsApp संदेश भेजने में त्रुटि हुई।'
     });
   }
@@ -1047,69 +1030,42 @@ const DEFAULT_PRESET_TEMPLATES = [
     language: 'hi',
     components: [
       {
-        type: 'HEADER',
-        format: 'TEXT',
-        text: 'डिजिटल मतदाता सूचना पर्ची 🗳️'
-      },
-      {
         type: 'BODY',
-        text: 'नमस्कार {{1}} जी,\n\nआपकी डिजिटल मतदाता सूचना पर्ची विवरण:\n• पहचान पत्र (EPIC): {{2}}\n• वार्ड संख्या: {{3}}\n• भाग संख्या: {{4}}\n• क्रमांक संख्या: #{{5}}\n• मतदान केंद्र: {{6}}\n\nकृपया मतदान दिवस पर अपना पहचान पत्र साथ लाएं। आपका वोट, आपका अधिकार!',
+        text: 'नमस्कार {{1}} जी, आपकी मतदाता पर्ची विवरण:\n\n• पहचान पत्र (EPIC): {{2}}\n• वार्ड संख्या: {{3}}\n• भाग संख्या: {{4}}\n• मतदाता क्रमांक: {{5}}\n• मतदान केंद्र: {{6}}\n\nमतदान हमारा अधिकार है। कृपया पहचान पत्र साथ लाएं।',
         example: {
           body_text: [
-            ['रमेश कुमार', 'RJ/17/105/012345', '12', '45', '142', 'राजकीय उच्च प्राथमिक विद्यालय']
+            ['रमेश कुमार', 'VJS1234567', '1', '23', '105', 'रा.उ.प्रा. विद्यालय']
           ]
         }
-      },
-      {
-        type: 'FOOTER',
-        text: 'मतदाता पोर्टल चुनावी प्रबंधन'
       }
     ]
   },
   {
-    name: 'election_day_reminder_hi',
+    name: 'voter_slip_info',
     status: 'APPROVED',
     category: 'UTILITY',
     language: 'hi',
     components: [
       {
-        type: 'HEADER',
-        format: 'TEXT',
-        text: 'मतदान दिवस स्मरण 🗳️'
-      },
-      {
         type: 'BODY',
-        text: 'प्रिय {{1}} जी,\n\nआज मतदान का दिन है! आपका मतदान केंद्र {{2}} है। आपका क्रमांक संख्या #{{3}} है। कृपया अपने परिवार सहित मतदान केंद्र पहुंचकर अपने मताधिकार का प्रयोग करें।',
+        text: 'प्रिय मतदाता {{1}}, आपकी चुनाव पर्ची सूचना: पहचान पत्र संख्या {{2}}, वार्ड {{3}}, भाग {{4}}, सरल क्रमांक {{5}}, मतदान केंद्र {{6}}। मतदान अवश्य करें।',
         example: {
-          body_text: [
-            ['सुनीता देवी', 'सामुदायिक भवन, कक्ष 2', '89']
-          ]
+          body_text: [['राहुल', 'ABC1234567', '1', '2', '45', 'प्राथमिक विद्यालय']]
         }
-      },
-      {
-        type: 'FOOTER',
-        text: 'लोकतंत्र का महापर्व'
       }
     ]
   },
   {
-    name: 'booth_station_info_hi',
+    name: 'voter_slip_notice',
     status: 'APPROVED',
-    category: 'UTILITY',
+    category: 'MARKETING',
     language: 'hi',
     components: [
       {
-        type: 'HEADER',
-        format: 'TEXT',
-        text: 'मतदान केंद्र एवं सहायता सूचना'
-      },
-      {
         type: 'BODY',
-        text: 'नमस्कार {{1}} जी,\n\nआपके क्षेत्र का मतदान केंद्र {{2}} (भाग संख्या {{3}}) है। किसी भी सहायता या वाहन सुविधा के लिए हमारे बूथ कार्यकर्ता से संपर्क करें।',
+        text: 'नमस्ते {{1}} जी, आगामी चुनाव हेतु आपकी डिजिटल मतदाता पर्ची:\n\n• वोटर कार्ड: {{2}}\n• वार्ड: {{3}}\n• भाग: {{4}}\n• क्रम: {{5}}\n• केंद्र: {{6}}\n\nकृपया अपने मताधिकार का प्रयोग अवश्य करें।',
         example: {
-          body_text: [
-            ['विक्रम सिंह', 'राजकीय उच्च प्राथमिक विद्यालय', '4']
-          ]
+          body_text: [['राकेश', 'XYZ9876543', '2', '5', '88', 'सामुदायिक भवन']]
         }
       }
     ]
@@ -1128,23 +1084,27 @@ router.get('/templates', verifyToken, async (req, res) => {
 
     const token = process.env.META_WHATSAPP_TOKEN?.trim();
     const phoneNumberId = process.env.META_PHONE_ID?.trim();
+    const configuredWabaId = process.env.META_WABA_ID?.trim() || '4105243026447031';
     const graphApiVersion = process.env.META_GRAPH_API_VERSION?.trim() || 'v20.0';
 
     let metaTemplates = [];
     let isLiveFromMeta = false;
 
-    if (token && phoneNumberId) {
+    if (token) {
       try {
-        const phoneRes = await axios.get(
-          `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}?fields=whatsapp_business_account`,
-          { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
-        );
-        const wabaId = phoneRes.data?.whatsapp_business_account?.id;
+        let wabaId = configuredWabaId;
+        if (!wabaId && phoneNumberId) {
+          const phoneRes = await axios.get(
+            `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}?fields=whatsapp_business_account`,
+            { headers: { Authorization: `Bearer ${token}` }, timeout: 5000 }
+          );
+          wabaId = phoneRes.data?.whatsapp_business_account?.id;
+        }
         
         if (wabaId) {
           const tmplRes = await axios.get(
             `https://graph.facebook.com/${graphApiVersion}/${wabaId}/message_templates?limit=100`,
-            { headers: { Authorization: `Bearer ${token}` }, timeout: 6000 }
+            { headers: { Authorization: `Bearer ${token}` }, timeout: 7000 }
           );
           if (Array.isArray(tmplRes.data?.data) && tmplRes.data.data.length > 0) {
             metaTemplates = tmplRes.data.data;
