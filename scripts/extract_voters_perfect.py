@@ -1041,8 +1041,8 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                         continue
                     txt = ''.join(chr(c) for c in b).strip()
 
-                    # EPIC No candidate tokens on top card header
-                    if sy - 5.0 <= y <= sy + 5.0 and cb_x + 25.0 <= x <= cb_x + 165.0 and f != '/9':
+                    # EPIC No candidate tokens on top card header (generous 15pt window & full column width)
+                    if sy - 7.5 <= y <= sy + 7.5 and cb_x + 20.0 <= x <= cb_x + 168.0 and f != '/9':
                         if txt and not (txt.isdigit() and len(txt) <= 4 and abs(x - sx) < 5.0):
                             epic_tokens.append((x, txt))
 
@@ -1092,6 +1092,18 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                                 epic_no = it[1].replace(" ", "").upper()
                                 break
 
+                    # Auto-correct OCR glyph substitutions (e.g. S-prefix on deleted stamps or digit/letter flips)
+                    if epic_no:
+                        clean_ep = epic_no.replace(' ', '').upper()
+                        if len(clean_ep) == 11 and clean_ep[0] in ['S', 'E', 'R'] and clean_ep[1:4].isalpha() and clean_ep[4:].isdigit():
+                            clean_ep = clean_ep[1:]
+                        if len(clean_ep) == 10 and clean_ep[:3].isalpha():
+                            suf = clean_ep[3:]
+                            suf_fixed = "".join({'O': '0', 'I': '1', 'L': '1', 'B': '8', 'S': '5', 'Z': '2', 'G': '6'}.get(c, c) for c in suf)
+                            if suf_fixed.isdigit():
+                                clean_ep = clean_ep[:3] + suf_fixed
+                        epic_no = clean_ep
+
                 if house_no_tokens:
                     house_no_tokens.sort(key=lambda it: it[0])
                     raw_hn = ' '.join(t[1] for t in house_no_tokens if t[1]).strip()
@@ -1121,9 +1133,12 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                 if not include_deleted and s_num in deletions_serials:
                     continue
 
+                v_caste = predict_rajasthan_caste(name_hi, rel_hi, current_village_hi)
+                clean_epic = epic_no.strip() if epic_no else ""
+
                 voters_dict[s_num] = {
                     'क्रमांक': s_num,
-                    'पहचान पत्र क्रमांक (EPIC No)': epic_no or f"VOTER_W{ward_no}_P{part_no}_{s_num}",
+                    'पहचान पत्र क्रमांक (EPIC No)': clean_epic or '-',
                     'मतदाता का नाम': name_hi or 'मतदाता',
                     'संबंधी का नाम': rel_hi or '-',
                     'संबंध प्रकार': rel_type,
@@ -1136,7 +1151,7 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                     'स्थिति': status,
 
                     # Keys matching database and template (Pure Hindi Data Only)
-                    'epic': epic_no or f"VOTER_W{ward_no}_P{part_no}_{s_num}",
+                    'epic': clean_epic,
                     'ward': str(ward_no),
                     'part': str(part_no),
                     'serial': s_num,
@@ -1150,7 +1165,7 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                     'house_no': house_no or '-',
                     'house_no_hi': house_no or '-',
                     'mobile': '',
-                    'caste': '',
+                    'caste': v_caste,
                     'family_id': '',
                     'village_en': '',  # Pure Hindi Data Only
                     'village_hi': current_village_hi or '-',
@@ -1391,8 +1406,10 @@ def save_templated_voter_excel(voters_list, output_file_path, template_path=None
 
     # 1. Fill Sheet 1: Voters (Exact 18 columns, Pure Hindi Data only - English fields blank as requested)
     for v in voters_list:
+        raw_ep = str(v.get('epic') or '').strip()
+        v_epic = '' if (raw_ep.startswith('VOTER_') or raw_ep.startswith('UNREADABLE_')) else raw_ep
         row = [
-            v.get('epic') or ('' if v.get('status') != 'विलोपित' else f"VOTER_{v.get('serial', '')}"),
+            v_epic,
             str(v.get('ward') or ''),
             str(v.get('part') or ''),
             v.get('serial') or '',
@@ -1458,9 +1475,11 @@ def save_templated_voter_excel(voters_list, output_file_path, template_path=None
     deleted_font = Font(name="Calibri", size=11, color="C53030", bold=True)
 
     for row_idx, v in enumerate(voters_list, start=2):
+        raw_ep = str(v.get('epic') or '').strip()
+        v_epic = '' if (raw_ep.startswith('VOTER_') or raw_ep.startswith('UNREADABLE_')) else raw_ep
         row_vals = [
             v.get('serial', ''),
-            v.get('epic') or '-',
+            v_epic or '-',
             v.get('name_hi', ''),
             v.get('relative_name_hi', '-'),
             v.get('relation', 'पिता'),
