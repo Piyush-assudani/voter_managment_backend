@@ -7,6 +7,7 @@ const mongoose = require('mongoose');
 const { Organization, User, Voter, Lead, SystemSetting, SlipDispatch } = require('../models/index');
 const { verifyToken, isAdmin } = require('../middleware/authMiddleware');
 const { createWorkbook, addSheet, sendWorkbook } = require('../lib/xlsx');
+const { predictCaste, cleanVillageOrSectionName } = require('../lib/fuzzyNameMatcher');
 const cache = require('../lib/cache');
 
 const router = express.Router();
@@ -1118,7 +1119,7 @@ router.post('/upload-voters', verifyToken, isAdmin, upload.single('file'), async
   try {
     const workbook = new ExcelJS.Workbook();
     await workbook.xlsx.load(req.file.buffer);
-    const worksheet = workbook.worksheets[0];
+    const worksheet = workbook.getWorksheet('Voters') || workbook.getWorksheet('मतदाता सूची') || workbook.worksheets[0];
     if (!worksheet) return res.status(400).json({ message: 'The uploaded Excel file has no worksheets.' });
 
     // Dynamic Header Detection
@@ -1238,10 +1239,10 @@ router.post('/upload-voters', verifyToken, isAdmin, upload.single('file'), async
         houseNo: cleanImportHouseNo(cellText('houseNo', 12)),
         houseNoHi: cleanImportHouseNo(cellText('houseNoHi', 13)),
         mobileNo: cellText('mobileNo', 14) || '',
-        caste: cellText('caste', 15) || '',
+        caste: cellText('caste', 15) || predictCaste({ nameHi, relativeNameHi: cellText('relativeNameHi', 11), villageNameHi: cellText('villageNameHi', 18) || cellText('villageName', 17) || cellText('villageName', 9) }) || '',
         familyId: cellText('familyId', 16) || '',
-        villageName: cellText('villageName', 17) || '',
-        villageNameHi: cellText('villageNameHi', 18) || '',
+        villageName: cleanVillageOrSectionName(cellText('villageNameHi', 18) || cellText('villageName', 17) || cellText('villageName', 9) || ''),
+        villageNameHi: cleanVillageOrSectionName(cellText('villageNameHi', 18) || cellText('villageName', 17) || cellText('villageName', 9) || ''),
         organizationId,
       };
       if (defaultUploadedBy) {

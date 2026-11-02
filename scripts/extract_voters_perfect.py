@@ -744,6 +744,46 @@ def clean_village_or_section_name(text: str) -> str:
 
     return re.sub(r'\s+', ' ', s).strip()
 
+RAJASTHAN_CASTE_PATTERNS = [
+    (re.compile(r'(?:^|[^\u0900-\u097F])(मेघवाल|मेगवाल|बांदरा|बांद्रा|बलाई|रेगर|रैगर|जाटव|बैरवा)(?=[^\u0900-\u097F]|$)'), 'मेघवाल'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(भील|भीलनी|गरासिया|डामोर|मीणा)(?=[^\u0900-\u097F]|$)'), 'भील'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(सुथार|जांगिड़|खाती)(?=[^\u0900-\u097F]|$)'), 'सुथार'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(पालीवाल|ब्राह्मण|शर्मा|जोशी|व्यास|दवे|पुरोहित|गौड़)(?=[^\u0900-\u097F]|$)'), 'ब्राह्मण / पालीवाल'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(सेन|नाई|हजाम|नाईक)(?=[^\u0900-\u097F]|$)'), 'सेन / नाई'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(प्रजापत|प्रजापति|कुम्हार)(?=[^\u0900-\u097F]|$)'), 'प्रजापत / कुम्हार'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(जाट|चौधरी|गोदारा|बेनीवाल|पूनिया|ढाका|सहारन|डूडी|सियाग|जाखड़)(?=[^\u0900-\u097F]|$)'), 'जाट'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(बिश्नोई|विश्नोई)(?=[^\u0900-\u097F]|$)'), 'बिश्नोई'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(माली|सैनी)(?=[^\u0900-\u097F]|$)'), 'माली'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(दर्जी)(?=[^\u0900-\u097F]|$)'), 'दर्जी'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(देवासी|रेबारी|राइका)(?=[^\u0900-\u097F]|$)'), 'देवासी / रेबारी'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(गुर्जर|बैंसला)(?=[^\u0900-\u097F]|$)'), 'गुर्जर'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(चारण)(?=[^\u0900-\u097F]|$)'), 'चारण'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(जैन|ओसवाल|माहेश्वरी|अग्रवाल|गुप्ता|महाजन|बनिया)(?=[^\u0900-\u097F]|$)'), 'वैश्य / जैन'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(मुसलमान|खान|अंसारी|कुरैशी|मंसूरी|अली|मोहम्मद|दीन|शाह|पठान)(?=[^\u0900-\u097F]|$)'), 'मुस्लिम'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(कंवर|राठौड़|भाटी|सिंह|चौहान|सिसोदिया|पंवार|सोलंकी|शेखावत|राजपूत)(?=[^\u0900-\u097F]|$)'), 'राजपूत'),
+]
+
+COMMUNITY_VILLAGE_PATTERNS = [
+    (re.compile(r'(?:^|[^\u0900-\u097F])(मेघवाल|मेघवालों|मेगवाल|बांदरा)(?=[^\u0900-\u097F]|$)'), 'मेघवाल'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(भील|भीलों)(?=[^\u0900-\u097F]|$)'), 'भील'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(सुथार|सुथारों)(?=[^\u0900-\u097F]|$)'), 'सुथार'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(नाई|नाइयों|सेन)(?=[^\u0900-\u097F]|$)'), 'सेन / नाई'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(प्रजापत|प्रजापतों|कुम्हार|कुम्हारों)(?=[^\u0900-\u097F]|$)'), 'प्रजापत / कुम्हार'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(मुसलमान|मुसलमानों)(?=[^\u0900-\u097F]|$)'), 'मुस्लिम'),
+    (re.compile(r'(?:^|[^\u0900-\u097F])(रबारी|रबारियों|रेबारी|देवासी)(?=[^\u0900-\u097F]|$)'), 'देवासी / रेबारी'),
+]
+
+def predict_rajasthan_caste(name: str, rel_name: str, village_name: str = "") -> str:
+    name_text = f"{name or ''} {rel_name or ''}".strip()
+    for pat, caste in RAJASTHAN_CASTE_PATTERNS:
+        if pat.search(name_text):
+            return caste
+    if village_name:
+        for pat, caste in COMMUNITY_VILLAGE_PATTERNS:
+            if pat.search(village_name):
+                return caste
+    return ""
+
 def normalize_electoral_hindi(text: str) -> str:
     """Applies universal government electoral lexicon normalization rules."""
     if not text:
@@ -1204,18 +1244,24 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                             elif f != '/9' and ' ' in ''.join(chr(c) for c in b): rel_hashes.append('SPACE')
 
                     # House No line
-                    elif sy - 48.5 <= y <= sy - 32.0 and f != '/9':
-                        c_cand = re.sub(r'^[ :ः\.\-]+', '', txt).strip()
-                        c_cand = re.sub(r'^(?:मकान|संख्या|मकरन|सपखजर|सपखसर|गृह|house|no)[:ः\.\-\s]*', '', c_cand, flags=re.I).strip()
-                        c_cand = re.sub(r'[,:ः\.\s]+$', '', c_cand).strip()
-                        if c_cand and any(ch.isdigit() for ch in c_cand) and not any(k in c_cand for k in ['Photo', 'EPIC', 'RJ/', 'VOTER']):
-                            if re.match(r'^0+$', c_cand):
-                                c_cand = '-'
-                            elif re.match(r'^0+\d+$', c_cand):
-                                c_cand = str(int(c_cand))
-                            elif re.match(r'^0+\d+', c_cand):
-                                c_cand = re.sub(r'^0+(\d+)', r'\1', c_cand)
-                            house_no = c_cand
+                    elif sy - 48.5 <= y <= sy - 32.0:
+                        if f != '/9':
+                            c_cand = re.sub(r'^[ :ः\.\-]+', '', txt).strip()
+                            c_cand = re.sub(r'^(?:मकान|संख्या|मकरन|सपखजर|सपखसर|गृह|house|no)[:ः\.\-\s]*', '', c_cand, flags=re.I).strip()
+                            c_cand = re.sub(r'[,:ः\.\s]+$', '', c_cand).strip()
+                            if c_cand and not any(k in c_cand for k in ['Photo', 'EPIC', 'RJ/', 'VOTER']):
+                                if re.match(r'^0+$', c_cand):
+                                    c_cand = '-'
+                                elif re.match(r'^0+\d+$', c_cand):
+                                    c_cand = str(int(c_cand))
+                                elif re.match(r'^0+\d+', c_cand):
+                                    c_cand = re.sub(r'^0+(\d+)', r'\1', c_cand)
+                                house_no = c_cand
+                        elif f == '/9' and not house_no:
+                            dec_h = decode_hashes_to_hindi([ch_hash.get(c, '') for c in b]).strip()
+                            dec_h = re.sub(r'^(?:मकान|संख्या|मकरन|सपखजर|सपखसर|गृह)[:ः\.\-\s]*', '', dec_h).strip()
+                            if dec_h and dec_h not in ['मकान', 'संख्या', 'मकान संख्या', 'सपखजर', '-', '०']:
+                                house_no = dec_h
 
                     # Age & Gender line
                     elif sy - 58.0 <= y <= sy - 49.0:
@@ -1312,6 +1358,8 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                         except Exception as pe:
                             photo_filename = ""
 
+                v_caste = predict_rajasthan_caste(name_hi, rel_hi, current_village_hi)
+
                 voters_dict[s_num] = {
                     'क्रमांक': s_num,
                     'पहचान पत्र क्रमांक (EPIC No)': epic_no or f"VOTER_W{ward_no}_P{part_no}_{s_num}",
@@ -1341,10 +1389,12 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                     'house_no': house_no or '-',
                     'house_no_hi': house_no or '-',
                     'mobile': '',
-                    'caste': '',
+                    'caste': v_caste,
                     'family_id': '',
                     'village_en': transliterate_hindi(current_village_hi),
                     'village_hi': current_village_hi or '-',
+                    'panchayat': current_village_hi or 'रामदेवरा',
+                    'panchayat_hi': current_village_hi or 'रामदेवरा',
                     'status': status,
                     'photo_file': photo_filename
                 }
@@ -1370,6 +1420,18 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
     if newly_learned_glyphs or newly_learned_words:
         save_learned_dictionary(newly_learned_glyphs, newly_learned_words)
         print(f"[Auto-Learner] Successfully surveyed & added {len(newly_learned_glyphs)} glyphs to dictionary from {bn}.")
+
+    # Auto-assign household family grouping
+    house_to_fam = {}
+    for s_k in sorted(voters_dict.keys()):
+        v = voters_dict[s_k]
+        h = v.get('house_no')
+        if h and h != '-':
+            if h not in house_to_fam:
+                house_to_fam[h] = f"FAM_W{v.get('ward', '1')}_{h}"
+            v['family_id'] = house_to_fam[h]
+        else:
+            v['family_id'] = ''
 
     return [voters_dict[k] for k in sorted(voters_dict.keys())]
 

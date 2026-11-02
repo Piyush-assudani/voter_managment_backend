@@ -5,9 +5,7 @@ const crypto = require('crypto');
 const { performLocalOCR, cleanHindiText, cleanHouseNo } = require('../lib/ocrService');
 const { isKrutiDevText, convertKrutiDevToUnicode, autoConvertText, isPUAText } = require('../lib/krutiDevConverter');
 const { fixCorruptedHindi } = require('../lib/hindiDictionary');
-const { fuzzyCorrectName, cleanVillageOrSectionName } = require('../lib/fuzzyNameMatcher');
-const { needsAiRepair, repairVoterCardJs } = require('../lib/openrouterFallback');
-const { repairVoterCardGroq, reverifyVotersListGroq } = require('../lib/groqFallback');
+const { fuzzyCorrectName, cleanVillageOrSectionName, predictCaste } = require('../lib/fuzzyNameMatcher');
 
 function levenshtein(s1, s2) {
   if (s1.length < s2.length) return levenshtein(s2, s1);
@@ -313,6 +311,12 @@ const ExcelJS = require('exceljs');
               }
               return;
             }
+            const detectedCaste = cellVal(row, 'caste', 15) || predictCaste({
+              nameHi: cleanName,
+              relativeNameHi: cleanRel,
+              villageNameHi: villageHi
+            });
+
             finalVoterList.push({
               serialNo: serialVal || (finalVoterList.length + 1),
               epic: cleanEpic,
@@ -324,6 +328,7 @@ const ExcelJS = require('exceljs');
               houseNo: finalHouse,
               age: ageVal,
               gender: genderVal,
+              caste: detectedCaste,
               status: statusVal,
               wardNo: String(rowWard).trim(),
               panchayat: String(rowPanchayat).trim(),
@@ -378,20 +383,6 @@ const ExcelJS = require('exceljs');
         throw new Error(pythonErrorMsg);
       }
       throw new Error(`PDF से मतदाता रिकॉर्ड नहीं निकाले जा सके। कृपया सुनिश्चित करें कि फ़ाइल एक मान्य निर्वाचन आयोग (SEC/ECI) मतदाता सूची है।`);
-    }
-
-    // Tier 4 Fallback: Groq AI repair for any unreadable or corrupted cards
-    if (process.env.GROQ_API_KEY && finalVoterList.some(v => needsAiRepair(v))) {
-      const suspiciousCount = finalVoterList.filter(v => needsAiRepair(v)).length;
-      console.log(`[pdfWorker] Triggering Tier 4 Groq AI repair for ${suspiciousCount} suspicious/unreadable cards...`);
-      updateProgress(78, `🤖 Groq AI द्वारा ${suspiciousCount} संदिग्ध/अपठनीय नामों का शुद्धिकरण...`);
-      try {
-        finalVoterList = await reverifyVotersListGroq(finalVoterList, (pct, msg) => {
-          updateProgress(78 + Math.round(pct * 0.03), msg);
-        });
-      } catch (groqErr) {
-        console.warn('[pdfWorker] Groq AI verification warning:', groqErr.message);
-      }
     }
 
     // Assign generated Excel path (Python engine output is the primary source of truth)
@@ -454,6 +445,7 @@ const ExcelJS = require('exceljs');
           houseNo: voterHouse,
           age: voter.age,
           gender: voter.gender,
+          caste: voter.caste || predictCaste(voter),
           status: voterStatus,
           wardNo: targetWard,
           panchayat: String(voter.panchayat || panchayat || '').trim(),
