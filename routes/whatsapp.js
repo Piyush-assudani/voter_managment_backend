@@ -451,10 +451,14 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
       return res.status(404).json({ message: 'मतदाता रिकॉर्ड नहीं मिला।' });
     }
 
+    const org = await Organization.findById(orgId).lean();
     const voterName = dbVoter.nameHi || dbVoter.nameEn || 'मतदाता';
-    const ward = (dbVoter.wardNo || '').replace(/^(वार्ड|Ward)\s*/i, '') || '—';
+    const ward = (dbVoter.wardNo || '').toString().trim().replace(/^(वार्ड|Ward)\s*/i, '') || '—';
     const cleanWard = (dbVoter.wardNo || '').toString().trim().replace(/^(वार्ड|Ward)\s*/i, '').trim();
     const rawWard = (dbVoter.wardNo || '').toString().trim();
+    const part = (dbVoter.partNo || req.body.partNo || '').toString().trim().replace(/^(भाग|Part)\s*/i, '').trim() || '—';
+    const serial = dbVoter.serialNo || '—';
+    const displayEpic = (dbVoter.epic && !dbVoter.epic.startsWith('VOTER_') && !dbVoter.epic.startsWith('UNREADABLE_')) ? dbVoter.epic : '—';
     const wardStation = org?.slipConfig?.wardPollingStations && typeof org.slipConfig.wardPollingStations === 'object'
       ? (org.slipConfig.wardPollingStations[cleanWard]
          || org.slipConfig.wardPollingStations[rawWard]
@@ -468,7 +472,7 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
     const dispatch = await SlipDispatch.create({
       _id: `disp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       voterId: dbVoter._id,
-      voterEpic: dbVoter.epic,
+      voterEpic: displayEpic,
       voterName,
       recipientPhone,
       status: 'sending',
@@ -500,7 +504,7 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
 नमस्कार *${voterName}* जी,
 आपकी डिजिटल मतदाता सूचना पर्ची विवरण:
 
-• पहचान पत्र (EPIC): *${dbVoter.epic || '—'}*
+• पहचान पत्र (EPIC): *${displayEpic}*
 • नाम: *${voterName}*
 • वार्ड: *${ward}* · भाग संख्या: *${part}*
 • मतदाता सूची क्रमांक: *${serial}*
@@ -541,18 +545,18 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
                     ? [
                         { type: 'text', text: voterName },
                         { type: 'text', text: voterName },
-                        { type: 'text', text: dbVoter.epic || '—' },
+                        { type: 'text', text: displayEpic },
                         { type: 'text', text: ward },
                         { type: 'text', text: part },
-                        { type: 'text', text: String(dbVoter.serialNo || '—') },
+                        { type: 'text', text: String(serial || '—') },
                         { type: 'text', text: boothName }
                       ]
                     : [
                         { type: 'text', text: voterName },
-                        { type: 'text', text: dbVoter.epic || '—' },
+                        { type: 'text', text: displayEpic },
                         { type: 'text', text: ward },
                         { type: 'text', text: part },
-                        { type: 'text', text: String(dbVoter.serialNo || '—') },
+                        { type: 'text', text: String(serial || '—') },
                         { type: 'text', text: boothName }
                       ]
                 }
@@ -613,18 +617,18 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
                   ? [
                       { type: 'text', text: voterName },
                       { type: 'text', text: voterName },
-                      { type: 'text', text: dbVoter.epic || '—' },
+                      { type: 'text', text: displayEpic },
                       { type: 'text', text: ward },
                       { type: 'text', text: part },
-                      { type: 'text', text: String(dbVoter.serialNo || '—') },
+                      { type: 'text', text: String(serial || '—') },
                       { type: 'text', text: boothName }
                     ]
                   : [
                       { type: 'text', text: voterName },
-                      { type: 'text', text: dbVoter.epic || '—' },
+                      { type: 'text', text: displayEpic },
                       { type: 'text', text: ward },
                       { type: 'text', text: part },
-                      { type: 'text', text: String(dbVoter.serialNo || '—') },
+                      { type: 'text', text: String(serial || '—') },
                       { type: 'text', text: boothName }
                     ]
               }
@@ -771,6 +775,7 @@ router.post('/send-manual', verifyToken, requireModule('voters'), async (req, re
     const rawWard = (dbVoter.wardNo || '').toString().trim();
     const part = (dbVoter.partNo || req.body.partNo || '').toString().trim() || '—';
     const serial = dbVoter.serialNo || '—';
+    const displayEpic = (dbVoter.epic && !dbVoter.epic.startsWith('VOTER_') && !dbVoter.epic.startsWith('UNREADABLE_')) ? dbVoter.epic : '—';
     const wardStation = org?.slipConfig?.wardPollingStations && typeof org.slipConfig.wardPollingStations === 'object'
       ? (org.slipConfig.wardPollingStations[cleanWard]
          || org.slipConfig.wardPollingStations[rawWard]
@@ -789,7 +794,7 @@ router.post('/send-manual', verifyToken, requireModule('voters'), async (req, re
     const dispatch = await SlipDispatch.create({
       _id: `disp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       voterId: dbVoter._id,
-      voterEpic: dbVoter.epic,
+      voterEpic: displayEpic,
       voterName: isFamily ? `मकान #${dbVoter.houseNo || '—'} परिवार (${familyCount} सदस्य)` : voterName,
       recipientPhone,
       status: 'manual_link',
@@ -839,7 +844,7 @@ ${directPhotoLink}
 📸 *डिजिटल मतदाता पर्ची फोटो देखें / डाउनलोड करें:*
 ${directPhotoLink}
 
-• *पहचान पत्र क्रमांक (EPIC):* ${dbVoter.epic || '—'}
+• *पहचान पत्र क्रमांक (EPIC):* ${displayEpic}
 • *नाम:* ${voterName}
 ${relativeName ? `• *${relationType}:* ${relativeName}\n` : ''}• *वार्ड क्रमांक:* ${ward}
 • *भाग संख्या:* ${part}
