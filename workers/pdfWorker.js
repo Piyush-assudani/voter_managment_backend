@@ -63,6 +63,80 @@ function stripNameFromRelative(voterName, relName) {
   return rn;
 }
 
+const SURNAMES_FOR_HOUSE_MATCH = new Set([
+  'चौधरी', 'सिंह', 'कंवर', 'सियाग', 'सेवर', 'फंगाल', 'पिन्डे ल', 'पिन्डेल', 'बिश्नोई',
+  'जाट', 'मेघवाल', 'कुम्हार', 'शर्मा', 'वर्मा', 'सुथार', 'गोदारा', 'सारण', 'बेनीवाल',
+  'खत्री', 'देवी', 'बाई', 'कुमार', 'राम'
+]);
+
+function getBaseDevanagariName(name) {
+  if (!name) return '';
+  let s = String(name).trim().replace(/^(?:श्री|श्रीमती|स्व\.|स्वर्गीय|डॉ\.|मा\.|पं\.)\s*/g, '');
+  s = s.replace(/\s+/g, ' ');
+  const words = s.split(' ');
+  if (words.length > 1 && SURNAMES_FOR_HOUSE_MATCH.has(words[words.length - 1])) {
+    words.pop();
+  }
+  return words.join('').replace(/[ंँ]/g, 'न');
+}
+
+function resolveFamilyHouseNumbers(voterList) {
+  if (!Array.isArray(voterList) || voterList.length === 0) return voterList;
+
+  // 1. Clean and normalize existing house numbers
+  for (const v of voterList) {
+    v.houseNo = cleanHouseNo(v.houseNo);
+    v.houseNoHi = v.houseNo;
+  }
+
+  // 2. Verified pool with authentic house numbers
+  const validPool = voterList.filter(v => v.houseNo && v.houseNo !== '-');
+  if (validPool.length === 0) return voterList;
+
+  // 3. Resolve for voters with missing or '-' house numbers
+  for (const v of voterList) {
+    if (v.houseNo && v.houseNo !== '-') continue;
+
+    const sNum = typeof v.serialNo === 'number' ? v.serialNo : parseInt(v.serialNo, 10) || 0;
+    const relName = (v.relativeNameHi || '').trim();
+    const baseRel = getBaseDevanagariName(relName);
+    if (!baseRel) continue;
+
+    const candidates = [];
+    for (const cand of validPool) {
+      const cBaseName = getBaseDevanagariName(cand.nameHi);
+      const cSNum = typeof cand.serialNo === 'number' ? cand.serialNo : parseInt(cand.serialNo, 10) || 0;
+      const dist = Math.abs(cSNum - sNum);
+
+      // Priority 1: Direct spouse or parent match
+      if (baseRel === cBaseName || baseRel.includes(cBaseName) || cBaseName.includes(baseRel)) {
+        candidates.push({ dist, priority: 1, houseNo: cand.houseNo });
+      }
+      // Priority 2: Relative's relative match (sibling/parent)
+      const cRelName = getBaseDevanagariName(cand.relativeNameHi);
+      if (cRelName && (baseRel === cRelName || baseRel.includes(cRelName) || cRelName.includes(baseRel))) {
+        candidates.push({ dist, priority: 2, houseNo: cand.houseNo });
+      }
+    }
+
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => a.priority - b.priority || a.dist - b.dist);
+      v.houseNo = candidates[0].houseNo;
+      v.houseNoHi = candidates[0].houseNo;
+    }
+  }
+
+  // 4. Final pass: Any remaining empty is clean '-'
+  for (const v of voterList) {
+    if (!v.houseNo || v.houseNo === '0' || v.houseNo === '00') {
+      v.houseNo = '-';
+      v.houseNoHi = '-';
+    }
+  }
+
+  return voterList;
+}
+
 async function processPdf() {
   const { filePath, useOcr, organizationId, wardNo, boothNo, panchayat, uploadedBy, withPhotos, jobId } = workerData;
   let text = "";
@@ -402,6 +476,9 @@ const ExcelJS = require('exceljs');
         if (fs.existsSync(excelPath)) generatedExcelPath = excelPath;
       }
     }
+
+    // 4. Intelligent Family House Number Resolution & Leading-Zero Normalization
+    resolveFamilyHouseNumbers(finalVoterList);
 
     updateProgress(82, '👨‍👩‍👧‍👦 मतदाताओं के पारिवारिक समूह (Family Grouping) तैयार किए जा रहे हैं...');
     const { groupVotersIntoFamilies } = require('../lib/familyService');

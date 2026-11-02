@@ -24,7 +24,7 @@ const ensureSchema = async () => {
     if (existingOrgCount === 0) {
       const org = await Organization.create({
         _id: defaultOrgId,
-        name: 'ग्राम पंचायत ओसियां (चुनाव क्षेत्र)',
+        name: 'विजयसेतु चुनाव प्रबंधन प्रणाली',
         district: 'जोधपुर',
         ulbPanchayatSamiti: 'ओसियां',
         ulbWardGramPanchayat: 'ओसियां',
@@ -43,7 +43,7 @@ const ensureSchema = async () => {
       }
     }
 
-    // 2. Ensure Master Admin Account (matdata / matdata@123456&qwerty)
+    // 2. Ensure Master Admin Account (admin / matdata)
     const masterPassHash = await bcrypt.hash('matdata@123456&qwerty', 10);
     let masterAdmin = await User.findOne({
       $or: [{ username: /^matdata$/i }, { email: /^matdata@/i }]
@@ -52,10 +52,10 @@ const ensureSchema = async () => {
       masterAdmin = await User.create({
         _id: 'user_admin_master_matdata',
         username: 'matdata',
-        email: 'matdata@matdataportal.com',
+        email: 'admin@vijaysetu.com',
         passwordHash: masterPassHash,
         initialPassword: 'matdata@123456&qwerty',
-        fullName: 'Matdata Master Admin',
+        fullName: 'VijaySetu Master Admin',
         phone: '9876543210',
         role: 'admin',
         organizationId: defaultOrgId,
@@ -69,7 +69,6 @@ const ensureSchema = async () => {
       masterAdmin.role = 'admin';
       masterAdmin.isActive = true;
       await masterAdmin.save();
-      console.log('✅ Master Admin updated: ID: matdata');
     }
 
     // 3. Optional Second Admin Account (Configurable via environment variables)
@@ -107,7 +106,7 @@ const ensureSchema = async () => {
     }
 
     // 4. Default admin fallback
-    const adminEmail = (process.env.BOOTSTRAP_ADMIN_EMAIL || 'admin@matdataportal.com').trim().toLowerCase();
+    const adminEmail = (process.env.BOOTSTRAP_ADMIN_EMAIL || 'admin@vijaysetu.com').trim().toLowerCase();
     const adminPassword = process.env.BOOTSTRAP_ADMIN_PASSWORD || 'admin123456';
     let defaultAdminUser = await User.findOne({ email: adminEmail });
     if (!defaultAdminUser) {
