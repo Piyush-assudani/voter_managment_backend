@@ -527,6 +527,12 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
     }
 
     const org = await Organization.findById(orgId).lean();
+    const candidateName = (
+      req.body.candidateName ||
+      org?.slipConfig?.candidateName ||
+      org?.name ||
+      'माननीय प्रत्याशी'
+    ).toString().trim();
     const voterName = dbVoter.nameHi || dbVoter.nameEn || 'मतदाता';
     const ward = (dbVoter.wardNo || '').toString().trim().replace(/^(वार्ड|Ward)\s*/i, '') || '—';
     const cleanWard = (dbVoter.wardNo || '').toString().trim().replace(/^(वार्ड|Ward)\s*/i, '').trim();
@@ -581,32 +587,23 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
 
 • पहचान पत्र (EPIC): *${displayEpic}*
 • नाम: *${voterName}*
+• प्रत्याशी: *${candidateName}*
 • वार्ड: *${ward}* · भाग संख्या: *${part}*
 • मतदाता सूची क्रमांक: *${serial}*
 • मतदान केंद्र: *${boothName}*
 
 ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${publicImageUrl}\n\n` : ''}🇮🇳 मतदान हमारा अधिकार एवं कर्तव्य है। कृपया पहचान पत्र (Voter ID/आधार कार्ड) साथ लाएं।
-*— मतदाता पोर्टल (Matdata Portal) इलेक्शन मैनेजमेंट*`;
+*— कार्यालय ${candidateName}*`;
 
     let response;
     let lastError = null;
 
-    // Helper to build 6 standard parameters for voter slip templates
+    // Helper to build 7 parameters for Meta voter slip templates
     const buildTemplateParams = (tmplName) => {
-      if (tmplName === 'voter_slip_card_hi') {
-        return [
-          { type: 'text', text: voterName },
-          { type: 'text', text: voterName },
-          { type: 'text', text: displayEpic },
-          { type: 'text', text: String(ward || '—') },
-          { type: 'text', text: String(part || '—') },
-          { type: 'text', text: String(serial || '—') },
-          { type: 'text', text: String(boothName || '—') }
-        ];
-      }
       return [
-        { type: 'text', text: voterName },
-        { type: 'text', text: displayEpic },
+        { type: 'text', text: voterName || 'मतदाता' },
+        { type: 'text', text: candidateName || 'माननीय प्रत्याशी' },
+        { type: 'text', text: displayEpic || '—' },
         { type: 'text', text: String(ward || '—') },
         { type: 'text', text: String(part || '—') },
         { type: 'text', text: String(serial || '—') },
@@ -617,15 +614,34 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
     // Candidate template names to try in order of priority (Approved Utility first, then Marketing)
     const templatesToTry = [
       templateName,
-      'voter_slip_dispatch',
-      'voter_slip_info',
-      'voter_slip_notice'
+      'voter_slip_official_utility',
+      'voter_campaign_appeal',
+      'voter_vikas_sankalp',
+      'voter_slip_card_utility'
     ].filter((t, idx, arr) => Boolean(t) && arr.indexOf(t) === idx);
 
     // 1. Try sending via Meta Approved Template
     for (const curTemplate of templatesToTry) {
       if (response) break;
       try {
+        const components = [];
+        // Header Image (if image is available and template uses image header)
+        if (mediaId || publicImageUrl) {
+          components.push({
+            type: 'header',
+            parameters: [
+              mediaId
+                ? { type: 'image', image: { id: mediaId } }
+                : { type: 'image', image: { link: publicImageUrl } }
+            ]
+          });
+        }
+        // Body parameters
+        components.push({
+          type: 'body',
+          parameters: buildTemplateParams(curTemplate)
+        });
+
         const templatePayload = {
           messaging_product: 'whatsapp',
           recipient_type: 'individual',
@@ -634,12 +650,7 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
           template: {
             name: curTemplate,
             language: { code: 'hi' },
-            components: [
-              {
-                type: 'body',
-                parameters: buildTemplateParams(curTemplate)
-              }
-            ]
+            components
           }
         };
 
@@ -1346,8 +1357,30 @@ router.post('/templates/test-send', verifyToken, async (req, res) => {
       return res.status(400).json({ message: 'Meta WhatsApp Token या Phone ID कॉन्फ़िगर नहीं है।' });
     }
 
-    const tmplName = templateName || metaConfig.templateName || 'voter_slip_dispatch';
+    const tmplName = templateName || metaConfig.templateName || 'voter_slip_official_utility';
     const lang = templateLanguage || metaConfig.templateLanguage || 'hi';
+
+    const sampleImageUrl = 'https://images.unsplash.com/photo-1540910419892-4a36d2c3266c?auto=format&fit=crop&w=800&q=80';
+    const components = [
+      {
+        type: 'header',
+        parameters: [
+          { type: 'image', image: { link: sampleImageUrl } }
+        ]
+      },
+      {
+        type: 'body',
+        parameters: [
+          { type: 'text', text: 'परीक्षण मतदाता' },
+          { type: 'text', text: 'माननीय प्रत्याशी' },
+          { type: 'text', text: 'TEST0000001' },
+          { type: 'text', text: '12' },
+          { type: 'text', text: '45' },
+          { type: 'text', text: '108' },
+          { type: 'text', text: 'राजकीय आदर्श विद्यालय' }
+        ]
+      }
+    ];
 
     const testPayload = {
       messaging_product: 'whatsapp',
@@ -1357,19 +1390,7 @@ router.post('/templates/test-send', verifyToken, async (req, res) => {
       template: {
         name: tmplName,
         language: { code: lang },
-        components: [
-          {
-            type: 'body',
-            parameters: [
-              { type: 'text', text: 'परीक्षण मतदाता' },
-              { type: 'text', text: 'TEST0000001' },
-              { type: 'text', text: '12' },
-              { type: 'text', text: '45' },
-              { type: 'text', text: '1' },
-              { type: 'text', text: 'राजकीय आदर्श विद्यालय' }
-            ]
-          }
-        ]
+        components
       }
     };
 
