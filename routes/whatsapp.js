@@ -137,6 +137,57 @@ function normalizePhoneNumber(input) {
   return digits;
 }
 
+let cachedMetaHealth = { timestamp: 0, canSendMessage: true, reason: '', errors: [] };
+
+/**
+ * Live Health Check for Meta WhatsApp Cloud API (Payment Method & Account Blockage)
+ */
+async function checkMetaHealth(phoneNumberId, token, graphApiVersion = 'v20.0') {
+  if (!phoneNumberId || !token) {
+    return { canSendMessage: false, reason: 'Meta API कॉन्फ़िगर नहीं है।' };
+  }
+  const now = Date.now();
+  if (now - cachedMetaHealth.timestamp < 60000) { // cache for 1 minute
+    return cachedMetaHealth;
+  }
+  try {
+    const res = await axios.get(
+      `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}?fields=health_status,name_status,status`,
+      { headers: { Authorization: `Bearer ${token}` }, timeout: 6000 }
+    );
+    const health = res.data?.health_status;
+    const nameStatus = res.data?.name_status;
+    
+    if (health?.can_send_message === 'BLOCKED') {
+      const wabaEntity = health.entities?.find(e => e.entity_type === 'WABA');
+      const wabaError = wabaEntity?.errors?.[0];
+      const errorCode = wabaError?.error_code || 141006;
+      let desc = wabaError?.error_description || 'Meta WhatsApp Business खाते द्वारा संदेश भेजना ब्लॉक (BLOCKED) है।';
+      let solution = wabaError?.possible_solution || 'कृपया Meta Business Manager में पेमेंट मेथड जोड़ें।';
+      
+      if (errorCode === 141006) {
+        desc = 'Meta Business Manager में WhatsApp Business Account (MOXRATHORE.com) पर पेमेंट मेथड (कार्ड) की त्रुटि है, जिससे Meta ने बिजनेस संदेश भेजना रोक रखा है।';
+        solution = 'Meta Business Suite में जाकर नया Payment Method (कार्ड) जोड़ें।';
+      }
+
+      cachedMetaHealth = {
+        timestamp: now,
+        canSendMessage: false,
+        reason: `${desc} ${solution}`,
+        errorCode,
+        nameStatus
+      };
+      return cachedMetaHealth;
+    }
+
+    cachedMetaHealth = { timestamp: now, canSendMessage: true, reason: '', nameStatus };
+    return cachedMetaHealth;
+  } catch (err) {
+    // If health API fails (e.g. timeout), do not hard-block
+    return { timestamp: now, canSendMessage: true, reason: '' };
+  }
+}
+
 /**
  * Deduplication tracker: tracks phone numbers dispatched in current campaign round
  * Prevents spamming 10 identical messages if multiple family members share the same phone number.
@@ -275,6 +326,20 @@ router.get('/status', (req, res) => {
 });
 
 /**
+ * GET /api/whatsapp/health - Check live Meta WhatsApp sending health & billing status
+ */
+router.get('/health', async (req, res) => {
+  const token = process.env.META_WHATSAPP_TOKEN?.trim();
+  const phoneNumberId = process.env.META_PHONE_ID?.trim();
+  const graphApiVersion = process.env.META_GRAPH_API_VERSION?.trim() || 'v20.0';
+  const health = await checkMetaHealth(phoneNumberId, token, graphApiVersion);
+  res.json({
+    success: true,
+    ...health
+  });
+});
+
+/**
  * GET /api/whatsapp/webhook - Meta Webhook Verification
  * Used by Meta Developers Console to verify the webhook URL
  */
@@ -404,6 +469,16 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
     if (!token || !phoneNumberId) {
       return res.status(503).json({
         message: 'Meta Cloud API कॉन्फ़िगर नहीं है। कृपया सुपर एडमिन में Meta टोकन व Phone ID दर्ज करें या "डायरेक्ट WhatsApp" का उपयोग करें।'
+      });
+    }
+
+    // Proactive Meta Cloud API Account Health & Billing Check
+    const health = await checkMetaHealth(phoneNumberId, token, graphApiVersion);
+    if (!health.canSendMessage) {
+      return res.status(422).json({
+        success: false,
+        isBlocked: true,
+        message: `⚠️ Meta WhatsApp रोक: ${health.reason} कृपया 'डायरेक्ट WhatsApp (फोटो + पर्ची)' बटन का उपयोग करें, जिससे 100% तुरंत संदेश चला जाएगा।`
       });
     }
 
