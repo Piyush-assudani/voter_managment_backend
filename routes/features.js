@@ -106,6 +106,10 @@ router.get('/war-room', requireModule('warroom'), async (req, res) => {
 router.get('/dashboard', async (req, res) => {
   try {
     const match = addVoterAccess(req);
+    const orgId = match.organizationId || req.user?.organizationId || 'org_default';
+    const cacheKey = `dashboard_${orgId}_${req.user?.id || 'all'}`;
+    const cachedStats = cache.get(cacheKey);
+    if (cachedStats) return res.json(cachedStats);
 
     const [aggregateResult, distinctWards, dispatchesCount, migrantCount] = await Promise.all([
       Voter.aggregate([
@@ -138,6 +142,7 @@ router.get('/dashboard', async (req, res) => {
       migrantCount
     };
 
+    cache.set(cacheKey, stats, 20);
     res.json(stats);
   } catch (err) {
     console.error('Dashboard data failed:', err.message);
@@ -282,6 +287,11 @@ router.get('/migrants', requireModule('migrants'), async (req, res) => {
 router.get('/caste-breakdown', requireModule('community', 'voters'), async (req, res) => {
   try {
     const orgId = getEffectiveOrgId(req);
+    const wardKey = typeof req.query.ward === 'string' ? req.query.ward.trim() : 'all';
+    const cacheKey = `caste_breakdown_${orgId}_${wardKey}`;
+    const cachedData = cache.get(cacheKey);
+    if (cachedData) return res.json(cachedData);
+
     const userId = req.user?.id;
 
     // 1. Fetch configured caste options for this client
@@ -418,7 +428,7 @@ router.get('/caste-breakdown', requireModule('community', 'voters'), async (req,
     const totalAllPending = totalAllVoters - totalAllVoted;
     const overallTurnout = totalAllVoters > 0 ? Number(((totalAllVoted / totalAllVoters) * 100).toFixed(1)) : 0;
 
-    res.json({
+    const result = {
       summary: {
         totalCastes: castes.length + (otherTotal > 0 ? 1 : 0),
         configuredCastesCount: castes.length,
@@ -430,7 +440,10 @@ router.get('/caste-breakdown', requireModule('community', 'voters'), async (req,
       },
       castes,
       other,
-    });
+    };
+
+    cache.set(cacheKey, result, 60);
+    res.json(result);
   } catch (err) {
     console.error('Caste breakdown aggregation failed:', err.message);
     res.status(500).json({ message: 'जातिगत समीकरण आंकड़े लोड नहीं हो सके।' });
@@ -496,7 +509,15 @@ router.get('/community', requireModule('community'), async (req, res) => {
       });
     }
 
-    let finalVoters = await Voter.find(matchQuery).lean();
+    // Concurrency & OOM Protection: If no search parameters or caste selected, return empty instead of loading entire database
+    if (!casteParam && !searchString && !ward && !isExport) {
+      return res.json(req.query.page || req.query.pageSize ? { data: [], page: 1, pageSize: 100, total: 0 } : []);
+    }
+
+    let finalVoters = await Voter.find(matchQuery)
+      .sort({ wardNo: 1, partNo: 1, serialNo: 1 })
+      .limit(isExport ? 15000 : 5000)
+      .lean();
 
     // Include family if requested and not restricted to a specific caste or votedStatus
     if (includeFamily && finalVoters.length > 0 && !casteParam && votedStatus === 'all' && searchString) {

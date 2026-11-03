@@ -132,7 +132,7 @@ app.get('/api/legal/policies', (_req, res) => {
   const host = _req.get('host') || 'localhost:5003';
   const proto = _req.protocol || 'http';
   res.json({
-    platform: 'Chunav Ranniti (चुनाव रणनीति)',
+    platform: 'VijaySetu (विजयसेतु)',
     version: '2026.1',
     effectiveDate: '2026-01-01',
     lastUpdated: new Date().toISOString(),
@@ -191,9 +191,14 @@ app.use((err, req, res, next) => {
 });
 
 const startServer = () => {
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     logger.info(`Server is running on port ${PORT}`);
   });
+  // High-concurrency socket resilience (prevents 502/socket hangs behind proxies under 100+ concurrent users)
+  server.keepAliveTimeout = 65000;
+  server.headersTimeout = 66000;
+  server.requestTimeout = 30000;
+  return server;
 };
 
 if (require.main === module) {

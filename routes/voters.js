@@ -1085,6 +1085,8 @@ router.put('/:id/vote', verifyToken, requireModule('poll-desk', 'turnout'), asyn
     const orgKey = query.organizationId || req.user.organizationId || 'org_default';
     cache.delPrefix(`voters_all_${orgKey}_`);
     cache.delPrefix(`turnout_summary_${orgKey}_`);
+    cache.delPrefix(`caste_breakdown_${orgKey}_`);
+    cache.delPrefix(`dashboard_${orgKey}_`);
     
     res.json({ success: true, message: 'Vote status updated.' });
   } catch (err) {
