@@ -117,6 +117,7 @@ voterSchema.index({ organizationId: 1, familyId: 1 });
 voterSchema.index({ organizationId: 1, epic: 1 });
 voterSchema.index({ organizationId: 1, nameHi: 1 });
 voterSchema.index({ organizationId: 1, mobileNo: 1 });
+voterSchema.index({ organizationId: 1, phone: 1 });
 voterSchema.index({ organizationId: 1, caste: 1 });
 voterSchema.index({ organizationId: 1, caste: 1, wardNo: 1 });
 voterSchema.index({ organizationId: 1, voted: 1 });
@@ -184,6 +185,8 @@ const slipDispatchSchema = new mongoose.Schema({
 });
 
 slipDispatchSchema.index({ organizationId: 1, createdAt: -1 });
+slipDispatchSchema.index({ organizationId: 1, recipientPhone: 1 });
+slipDispatchSchema.index({ recipientPhone: 1, windowExpiresAt: -1 });
 slipDispatchSchema.index({ organizationId: 1, status: 1, createdAt: -1 });
 slipDispatchSchema.index({ organizationId: 1, dispatchType: 1, createdAt: -1 });
 slipDispatchSchema.index({ organizationId: 1, campaignName: 1, createdAt: -1 });

@@ -34,6 +34,44 @@ const app = express();
 app.set('trust proxy', true);
 const PORT = process.env.PORT || 5002;
 
+// Dynamic & Configurable IP Blocking Middleware
+const blockedIPs = new Set(
+  (process.env.BLOCKED_IPS || '')
+    .split(',')
+    .map(ip => ip.trim())
+    .filter(Boolean)
+);
+
+// In-memory violation tracker for automatic threat mitigation
+const ipViolationTracker = new Map();
+
+function ipBlockMiddleware(req, res, next) {
+  const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || req.ip;
+  if (clientIp && blockedIPs.has(clientIp)) {
+    return res.status(403).json({
+      message: 'सुरक्षा नीति के उल्लंघन के कारण आपका IP पता अवरुद्ध (Blocked) है।'
+    });
+  }
+
+  // Reject automated vulnerability scanner probes (.env, wp-login, etc.)
+  const rawUrl = (req.originalUrl || req.url || '').toLowerCase();
+  if (rawUrl.includes('/.env') || rawUrl.includes('/wp-login') || rawUrl.includes('/phpmyadmin') || rawUrl.includes('eval-stdin')) {
+    if (clientIp) {
+      const violations = (ipViolationTracker.get(clientIp) || 0) + 1;
+      ipViolationTracker.set(clientIp, violations);
+      if (violations > 5) {
+        blockedIPs.add(clientIp);
+        console.warn(`[Security] IP ${clientIp} auto-blocked due to repeated exploit probing.`);
+      }
+    }
+    return res.status(403).json({ message: 'अवैध अनुरोध (Forbidden).' });
+  }
+
+  next();
+}
+
+app.use(ipBlockMiddleware);
+
 // High-Throughput Rate Limiters
 const rateLimit = require('express-rate-limit');
 
