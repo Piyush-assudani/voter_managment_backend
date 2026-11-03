@@ -31,7 +31,7 @@ async function getEffectiveMetaConfig(orgId) {
   const phoneNumberId = (org?.whatsappConfig?.phoneNumberId || defaultOrg?.whatsappConfig?.phoneNumberId || process.env.META_PHONE_ID || '').trim();
   const wabaId = (org?.whatsappConfig?.wabaId || defaultOrg?.whatsappConfig?.wabaId || process.env.META_WABA_ID || '').trim();
   const graphApiVersion = process.env.META_GRAPH_API_VERSION?.trim() || 'v20.0';
-  const templateName = org?.whatsappConfig?.templateName || org?.slipConfig?.whatsappTemplateName || defaultOrg?.whatsappConfig?.templateName || defaultOrg?.slipConfig?.whatsappTemplateName || 'voter_slip_dispatch';
+  const templateName = org?.whatsappConfig?.templateName || org?.slipConfig?.whatsappTemplateName || defaultOrg?.whatsappConfig?.templateName || defaultOrg?.slipConfig?.whatsappTemplateName || 'voter_slip_official_utility';
   const templateLanguage = org?.whatsappConfig?.templateLanguage || defaultOrg?.whatsappConfig?.templateLanguage || 'hi';
 
   return { token, phoneNumberId, wabaId, graphApiVersion, templateName, templateLanguage };
@@ -1110,48 +1110,69 @@ router.get('/history', verifyToken, requireModule('voters'), async (req, res) =>
 
 const DEFAULT_PRESET_TEMPLATES = [
   {
-    name: 'voter_slip_dispatch',
+    name: 'voter_slip_official_utility',
     status: 'APPROVED',
     category: 'UTILITY',
     language: 'hi',
+    hasImageHeader: true,
     components: [
+      { type: 'HEADER', format: 'IMAGE' },
       {
         type: 'BODY',
-        text: 'नमस्कार {{1}} जी, आपकी मतदाता पर्ची विवरण:\n\n• पहचान पत्र (EPIC): {{2}}\n• वार्ड संख्या: {{3}}\n• भाग संख्या: {{4}}\n• मतदाता क्रमांक: {{5}}\n• मतदान केंद्र: {{6}}\n\nमतदान हमारा अधिकार है। कृपया पहचान पत्र साथ लाएं।',
+        text: 'नमस्ते {{1}} जी,\nआगामी मतदान दिवस हेतु {{2}} कार्यालय द्वारा आपकी अधिकृत मतदाता पर्ची साझा की जा रही है:\n\n• वोटर आईडी: {{3}}\n• वार्ड संख्या: {{4}}\n• भाग संख्या: {{5}}\n• क्रम संख्या: {{6}}\n• आपका मतदान बूथ: {{7}}\n\nमतदान आपका अधिकार व कर्तव्य है। पर्ची की डिजिटल प्रति ऊपर संलग्न है।',
         example: {
-          body_text: [
-            ['रमेश कुमार', 'VJS1234567', '1', '23', '105', 'रा.उ.प्रा. विद्यालय']
-          ]
+          body_text: [['दिनेश जी', 'सुनील कुमार', 'XYZ9876543', '5', '22', '314', 'सामुदायिक भवन बूथ नंबर 2']]
         }
       }
     ]
   },
   {
-    name: 'voter_slip_info',
-    status: 'APPROVED',
-    category: 'UTILITY',
-    language: 'hi',
-    components: [
-      {
-        type: 'BODY',
-        text: 'प्रिय मतदाता {{1}}, आपकी चुनाव पर्ची सूचना: पहचान पत्र संख्या {{2}}, वार्ड {{3}}, भाग {{4}}, सरल क्रमांक {{5}}, मतदान केंद्र {{6}}। मतदान अवश्य करें।',
-        example: {
-          body_text: [['राहुल', 'ABC1234567', '1', '2', '45', 'प्राथमिक विद्यालय']]
-        }
-      }
-    ]
-  },
-  {
-    name: 'voter_slip_notice',
+    name: 'voter_campaign_appeal',
     status: 'APPROVED',
     category: 'MARKETING',
     language: 'hi',
+    hasImageHeader: true,
     components: [
+      { type: 'HEADER', format: 'IMAGE' },
       {
         type: 'BODY',
-        text: 'नमस्ते {{1}} जी, आगामी चुनाव हेतु आपकी डिजिटल मतदाता पर्ची:\n\n• वोटर कार्ड: {{2}}\n• वार्ड: {{3}}\n• भाग: {{4}}\n• क्रम: {{5}}\n• केंद्र: {{6}}\n\nकृपया अपने मताधिकार का प्रयोग अवश्य करें।',
+        text: 'आदरणीय {{1}} जी, सादर प्रणाम!\nआपके अपने जनसेवक व लोकप्रिय प्रत्याशी {{2}} की ओर से चुनाव में आपका बहुमूल्य आशीर्वाद और समर्थन सादर प्रार्थनीय है।\n\nआपकी मतदान पर्ची विवरण:\n• EPIC नंबर: {{3}}\n• वार्ड नंबर: {{4}}\n• भाग संख्या: {{5}}\n• क्रम संख्या: {{6}}\n• मतदान केंद्र: {{7}}\n\nक्षेत्र के चहुंमुखी विकास व प्रगति हेतु मतदान के दिन भारी संख्या में पहुँचकर विजय बनाएं। लोकतंत्र के महापर्व में अपना मत अवश्य दें!',
         example: {
-          body_text: [['राकेश', 'XYZ9876543', '2', '5', '88', 'सामुदायिक भवन']]
+          body_text: [['सुरेश वर्मा', 'राकेश चौधरी', 'RKS5544332', '8', '19', '77', 'राजकीय माध्यमिक विद्यालय कक्ष 1']]
+        }
+      }
+    ]
+  },
+  {
+    name: 'voter_vikas_sankalp',
+    status: 'APPROVED',
+    category: 'MARKETING',
+    language: 'hi',
+    hasImageHeader: true,
+    components: [
+      { type: 'HEADER', format: 'IMAGE' },
+      {
+        type: 'BODY',
+        text: 'जय हिंद {{1}} जी!\nविकास, सेवा और समर्पण के संकल्प के साथ आपके प्रत्याशी {{2}} आपसे विनम्र अपील करते हैं।\n\nआपकी वोटर पर्ची की जानकारी:\n• वोटर आईडी (EPIC): {{3}}\n• वार्ड नंबर: {{4}}\n• पार्ट नंबर: {{5}}\n• मतदाता क्रमांक: {{6}}\n• आपका पोलिंग बूथ: {{7}}\n\nमतदान केंद्र पहुँचें और अपने उज्ज्वल भविष्य व जन-कल्याण हेतु अपना अमूल्य वोट देकर भारी मतों से विजयी बनाएं।',
+        example: {
+          body_text: [['महेश सैनी', 'विजय सिंह', 'VJY1122334', '14', '63', '241', 'नगर परिषद वाचनालय भवन']]
+        }
+      }
+    ]
+  },
+  {
+    name: 'voter_slip_card_utility',
+    status: 'APPROVED',
+    category: 'UTILITY',
+    language: 'hi',
+    hasImageHeader: true,
+    components: [
+      { type: 'HEADER', format: 'IMAGE' },
+      {
+        type: 'BODY',
+        text: 'प्रिय {{1}} जी,\nकार्यालय {{2}} की ओर से आपकी मतदाता पर्ची विवरण निम्नलिखित है:\n\n• EPIC / वोटर आईडी: {{3}}\n• वार्ड क्र.: {{4}}\n• भाग / पार्ट क्र.: {{5}}\n• सरल क्र. (Serial No): {{6}}\n• मतदान केंद्र (Booth): {{7}}\n\nकृपया अपना पहचान पत्र साथ रखें व मतदान केंद्र पर समय पर पहुँचें। अधिक जानकारी व सहायता हेतु संपर्क करें।',
+        example: {
+          body_text: [['राजेश कुमार', 'अमित शर्मा', 'ABC1234567', '12', '45', '108', 'राजकीय उच्च प्राथमिक विद्यालय']]
         }
       }
     ]
@@ -1163,10 +1184,11 @@ const DEFAULT_PRESET_TEMPLATES = [
  */
 router.get('/templates', verifyToken, async (req, res) => {
   try {
-    const orgId = getEffectiveOrgId(req) || 'org_default';
+    const orgId = req.query.organizationId || getEffectiveOrgId(req) || 'org_default';
     const org = await Organization.findById(orgId).lean();
-    const activeTemplate = org?.whatsappConfig?.templateName || org?.slipConfig?.whatsappTemplateName || 'voter_slip_dispatch';
-    const activeLanguage = org?.whatsappConfig?.templateLanguage || 'hi';
+    const defaultOrg = await Organization.findById('org_default').lean();
+    const activeTemplate = org?.whatsappConfig?.templateName || org?.slipConfig?.whatsappTemplateName || defaultOrg?.whatsappConfig?.templateName || defaultOrg?.slipConfig?.whatsappTemplateName || 'voter_slip_official_utility';
+    const activeLanguage = org?.whatsappConfig?.templateLanguage || defaultOrg?.whatsappConfig?.templateLanguage || 'hi';
 
     const token = process.env.META_WHATSAPP_TOKEN?.trim();
     const phoneNumberId = process.env.META_PHONE_ID?.trim();
@@ -1193,7 +1215,11 @@ router.get('/templates', verifyToken, async (req, res) => {
             { headers: { Authorization: `Bearer ${token}` }, timeout: 7000 }
           );
           if (Array.isArray(tmplRes.data?.data) && tmplRes.data.data.length > 0) {
-            metaTemplates = tmplRes.data.data;
+            metaTemplates = tmplRes.data.data.map(t => ({
+              ...t,
+              hasImageHeader: Boolean(t.components?.some(c => (c.type === 'HEADER' || c.type === 'header') && (c.format === 'IMAGE' || c.format === 'image'))),
+              headerFormat: t.components?.find(c => c.type === 'HEADER' || c.type === 'header')?.format || 'TEXT'
+            }));
             isLiveFromMeta = true;
           }
         }
@@ -1209,10 +1235,18 @@ router.get('/templates', verifyToken, async (req, res) => {
       }
     }
 
+    const activeDetails = combined.find(t => t.name.toLowerCase() === activeTemplate.toLowerCase()) || {
+      name: activeTemplate,
+      status: 'APPROVED',
+      category: 'UTILITY',
+      hasImageHeader: true
+    };
+
     res.json({
       success: true,
       activeTemplate,
       activeLanguage,
+      activeDetails,
       isLiveFromMeta,
       organizationId: orgId,
       organizationName: org?.name || 'Default Organization',
@@ -1234,30 +1268,58 @@ router.post('/templates/select-active', verifyToken, async (req, res) => {
       return res.status(400).json({ message: 'टेम्पलेट का नाम आवश्यक है।' });
     }
 
-    const targetOrgId = organizationId || req.user.organizationId || 'org_default';
+    const cleanTemplate = templateName.trim();
+    const cleanLang = templateLanguage || 'hi';
 
-    await Organization.updateOne(
-      { _id: targetOrgId },
-      {
-        $set: {
-          'whatsappConfig.templateName': templateName.trim(),
-          'whatsappConfig.templateLanguage': templateLanguage || 'hi',
-          'slipConfig.whatsappTemplateName': templateName.trim()
+    if (organizationId) {
+      await Organization.updateOne(
+        { _id: organizationId },
+        {
+          $set: {
+            'whatsappConfig.templateName': cleanTemplate,
+            'whatsappConfig.templateLanguage': cleanLang,
+            'slipConfig.whatsappTemplateName': cleanTemplate
+          }
+        },
+        { upsert: true }
+      );
+    } else {
+      // Global setting
+      await Organization.updateOne(
+        { _id: 'org_default' },
+        {
+          $set: {
+            'whatsappConfig.templateName': cleanTemplate,
+            'whatsappConfig.templateLanguage': cleanLang,
+            'slipConfig.whatsappTemplateName': cleanTemplate
+          }
+        },
+        { upsert: true }
+      );
+      // Also update all organizations so the default is propagated
+      await Organization.updateMany(
+        {},
+        {
+          $set: {
+            'whatsappConfig.templateName': cleanTemplate,
+            'whatsappConfig.templateLanguage': cleanLang,
+            'slipConfig.whatsappTemplateName': cleanTemplate
+          }
         }
-      },
-      { upsert: true }
-    );
+      );
+    }
 
     res.json({
       success: true,
-      message: `Meta टेम्पलेट '${templateName}' सफलतापूर्वक सक्रिय (Active) कर दिया गया है।`,
-      activeTemplate: templateName,
-      activeLanguage: templateLanguage || 'hi'
+      message: `Meta टेम्पलेट '${cleanTemplate}' सफलतापूर्वक सक्रिय (Active) कर दिया गया है। अब सभी संदेश इसी टेम्पलेट से डिलीवर होंगे।`,
+      activeTemplate: cleanTemplate,
+      activeLanguage: cleanLang
     });
   } catch (err) {
     console.error('Error selecting active template:', err.message);
     res.status(500).json({ message: 'टेम्पलेट सक्रिय नहीं किया जा सका।' });
   }
+});
 });
 
 /**
