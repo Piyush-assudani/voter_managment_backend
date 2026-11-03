@@ -31,7 +31,7 @@ async function getEffectiveMetaConfig(orgId) {
   const phoneNumberId = (org?.whatsappConfig?.phoneNumberId || defaultOrg?.whatsappConfig?.phoneNumberId || process.env.META_PHONE_ID || '').trim();
   const wabaId = (org?.whatsappConfig?.wabaId || defaultOrg?.whatsappConfig?.wabaId || process.env.META_WABA_ID || '').trim();
   const graphApiVersion = process.env.META_GRAPH_API_VERSION?.trim() || 'v20.0';
-  const templateName = org?.whatsappConfig?.templateName || org?.slipConfig?.whatsappTemplateName || defaultOrg?.whatsappConfig?.templateName || defaultOrg?.slipConfig?.whatsappTemplateName || 'voter_slip_official_utility';
+  const templateName = org?.whatsappConfig?.templateName || org?.slipConfig?.whatsappTemplateName || defaultOrg?.whatsappConfig?.templateName || defaultOrg?.slipConfig?.whatsappTemplateName || 'voter_campaign_appeal';
   const templateLanguage = org?.whatsappConfig?.templateLanguage || defaultOrg?.whatsappConfig?.templateLanguage || 'hi';
 
   return { token, phoneNumberId, wabaId, graphApiVersion, templateName, templateLanguage };
@@ -611,13 +611,10 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
       ];
     };
 
-    // Candidate template names to try in order of priority (Approved Utility first, then Marketing)
+    // Candidate template names to try in order of priority (Active Approved Marketing Template)
     const templatesToTry = [
       templateName,
-      'voter_slip_official_utility',
-      'voter_campaign_appeal',
-      'voter_vikas_sankalp',
-      'voter_slip_card_utility'
+      'voter_campaign_appeal'
     ].filter((t, idx, arr) => Boolean(t) && arr.indexOf(t) === idx);
 
     // 1. Try sending via Meta Approved Template
@@ -1110,23 +1107,6 @@ router.get('/history', verifyToken, requireModule('voters'), async (req, res) =>
 
 const DEFAULT_PRESET_TEMPLATES = [
   {
-    name: 'voter_slip_official_utility',
-    status: 'APPROVED',
-    category: 'UTILITY',
-    language: 'hi',
-    hasImageHeader: true,
-    components: [
-      { type: 'HEADER', format: 'IMAGE' },
-      {
-        type: 'BODY',
-        text: 'नमस्ते {{1}} जी,\nआगामी मतदान दिवस हेतु {{2}} कार्यालय द्वारा आपकी अधिकृत मतदाता पर्ची साझा की जा रही है:\n\n• वोटर आईडी: {{3}}\n• वार्ड संख्या: {{4}}\n• भाग संख्या: {{5}}\n• क्रम संख्या: {{6}}\n• आपका मतदान बूथ: {{7}}\n\nमतदान आपका अधिकार व कर्तव्य है। पर्ची की डिजिटल प्रति ऊपर संलग्न है।',
-        example: {
-          body_text: [['दिनेश जी', 'सुनील कुमार', 'XYZ9876543', '5', '22', '314', 'सामुदायिक भवन बूथ नंबर 2']]
-        }
-      }
-    ]
-  },
-  {
     name: 'voter_campaign_appeal',
     status: 'APPROVED',
     category: 'MARKETING',
@@ -1142,40 +1122,6 @@ const DEFAULT_PRESET_TEMPLATES = [
         }
       }
     ]
-  },
-  {
-    name: 'voter_vikas_sankalp',
-    status: 'APPROVED',
-    category: 'MARKETING',
-    language: 'hi',
-    hasImageHeader: true,
-    components: [
-      { type: 'HEADER', format: 'IMAGE' },
-      {
-        type: 'BODY',
-        text: 'जय हिंद {{1}} जी!\nविकास, सेवा और समर्पण के संकल्प के साथ आपके प्रत्याशी {{2}} आपसे विनम्र अपील करते हैं।\n\nआपकी वोटर पर्ची की जानकारी:\n• वोटर आईडी (EPIC): {{3}}\n• वार्ड नंबर: {{4}}\n• पार्ट नंबर: {{5}}\n• मतदाता क्रमांक: {{6}}\n• आपका पोलिंग बूथ: {{7}}\n\nमतदान केंद्र पहुँचें और अपने उज्ज्वल भविष्य व जन-कल्याण हेतु अपना अमूल्य वोट देकर भारी मतों से विजयी बनाएं।',
-        example: {
-          body_text: [['महेश सैनी', 'विजय सिंह', 'VJY1122334', '14', '63', '241', 'नगर परिषद वाचनालय भवन']]
-        }
-      }
-    ]
-  },
-  {
-    name: 'voter_slip_card_utility',
-    status: 'APPROVED',
-    category: 'UTILITY',
-    language: 'hi',
-    hasImageHeader: true,
-    components: [
-      { type: 'HEADER', format: 'IMAGE' },
-      {
-        type: 'BODY',
-        text: 'प्रिय {{1}} जी,\nकार्यालय {{2}} की ओर से आपकी मतदाता पर्ची विवरण निम्नलिखित है:\n\n• EPIC / वोटर आईडी: {{3}}\n• वार्ड क्र.: {{4}}\n• भाग / पार्ट क्र.: {{5}}\n• सरल क्र. (Serial No): {{6}}\n• मतदान केंद्र (Booth): {{7}}\n\nकृपया अपना पहचान पत्र साथ रखें व मतदान केंद्र पर समय पर पहुँचें। अधिक जानकारी व सहायता हेतु संपर्क करें।',
-        example: {
-          body_text: [['राजेश कुमार', 'अमित शर्मा', 'ABC1234567', '12', '45', '108', 'राजकीय उच्च प्राथमिक विद्यालय']]
-        }
-      }
-    ]
   }
 ];
 
@@ -1187,7 +1133,7 @@ router.get('/templates', verifyToken, async (req, res) => {
     const orgId = req.query.organizationId || getEffectiveOrgId(req) || 'org_default';
     const org = await Organization.findById(orgId).lean();
     const defaultOrg = await Organization.findById('org_default').lean();
-    const activeTemplate = org?.whatsappConfig?.templateName || org?.slipConfig?.whatsappTemplateName || defaultOrg?.whatsappConfig?.templateName || defaultOrg?.slipConfig?.whatsappTemplateName || 'voter_slip_official_utility';
+    const activeTemplate = org?.whatsappConfig?.templateName || org?.slipConfig?.whatsappTemplateName || defaultOrg?.whatsappConfig?.templateName || defaultOrg?.slipConfig?.whatsappTemplateName || 'voter_campaign_appeal';
     const activeLanguage = org?.whatsappConfig?.templateLanguage || defaultOrg?.whatsappConfig?.templateLanguage || 'hi';
 
     const token = process.env.META_WHATSAPP_TOKEN?.trim();
@@ -1320,7 +1266,6 @@ router.post('/templates/select-active', verifyToken, async (req, res) => {
     res.status(500).json({ message: 'टेम्पलेट सक्रिय नहीं किया जा सका।' });
   }
 });
-});
 
 /**
  * POST /api/whatsapp/templates/create - Submit new template to Meta Cloud API
@@ -1419,7 +1364,7 @@ router.post('/templates/test-send', verifyToken, async (req, res) => {
       return res.status(400).json({ message: 'Meta WhatsApp Token या Phone ID कॉन्फ़िगर नहीं है।' });
     }
 
-    const tmplName = templateName || metaConfig.templateName || 'voter_slip_official_utility';
+    const tmplName = templateName || metaConfig.templateName || 'voter_campaign_appeal';
     const lang = templateLanguage || metaConfig.templateLanguage || 'hi';
 
     const sampleImageUrl = 'https://images.unsplash.com/photo-1540910419892-4a36d2c3266c?auto=format&fit=crop&w=800&q=80';
