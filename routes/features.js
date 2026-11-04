@@ -613,9 +613,18 @@ router.get('/dispatches', requireModule('history'), async (req, res) => {
     }
     if (typeof req.query.status === 'string' && req.query.status) {
       if (req.query.status === 'sent') {
-        // Sirf asli mein gaya ho: verified Meta sent
         query.status = 'sent';
         query.dispatchType = { $ne: 'manual_whatsapp' };
+      } else if (req.query.status === 'delivered') {
+        query.$or = [
+          { status: 'delivered' },
+          { deliveredAt: { $ne: null } }
+        ];
+      } else if (req.query.status === 'read') {
+        query.$or = [
+          { status: 'read' },
+          { readAt: { $ne: null } }
+        ];
       } else if (req.query.status === 'manual_link') {
         query.$or = [
           { dispatchType: 'manual_whatsapp' },
@@ -645,7 +654,8 @@ router.get('/dispatches', requireModule('history'), async (req, res) => {
             _id: {
               status: '$status',
               dispatchType: '$dispatchType',
-              hasMsgId: { $ne: ['$providerMessageId', null] }
+              hasDeliveredAt: { $ne: ['$deliveredAt', null] },
+              hasReadAt: { $ne: ['$readAt', null] }
             },
             count: { $sum: 1 }
           }
@@ -653,19 +663,24 @@ router.get('/dispatches', requireModule('history'), async (req, res) => {
       ])
     ]);
 
-    const summary = { total: 0, sent: 0, failed: 0, sending: 0, manual: 0 };
+    const summary = { total: 0, sent: 0, delivered: 0, read: 0, failed: 0, sending: 0, manual: 0 };
     for (const group of statusSummary) {
       const g = group._id || {};
       const count = group.count || 0;
       summary.total += count;
       if (g.dispatchType === 'manual_whatsapp' || g.status === 'manual_link') {
         summary.manual += count;
-      } else if (g.status === 'sent' && (g.hasMsgId || g.dispatchType === 'whatsapp')) {
-        summary.sent += count;
       } else if (g.status === 'failed') {
         summary.failed += count;
       } else if (g.status === 'sending') {
         summary.sending += count;
+      } else if (g.status === 'read' || g.hasReadAt) {
+        summary.read += count;
+        summary.delivered += count;
+      } else if (g.status === 'delivered' || g.hasDeliveredAt) {
+        summary.delivered += count;
+      } else if (g.status === 'sent') {
+        summary.sent += count;
       }
     }
 
@@ -679,6 +694,8 @@ router.get('/dispatches', requireModule('history'), async (req, res) => {
         slipType: item.slipType || 'individual',
         dispatchType: item.dispatchType || (item.status === 'manual_link' ? 'manual_whatsapp' : 'whatsapp'),
         status: item.status,
+        deliveredAt: item.deliveredAt || null,
+        readAt: item.readAt || null,
         providerMessageId: item.providerMessageId || null,
         errorMessage: item.errorMessage || '',
         createdAt: item.createdAt,
@@ -811,7 +828,17 @@ router.get('/export.xlsx', async (req, res) => {
         'फोन': item.recipientPhone,
         'पर्ची प्रकार': item.slipType === 'family' ? 'परिवार' : 'व्यक्तिगत',
         'माध्यम': item.dispatchType === 'manual_whatsapp' ? 'मैनुअल लिंक' : 'Meta Cloud API',
-        'स्थिति': item.status === 'sent' ? 'स्वीकारा गया' : item.status === 'manual_link' ? 'मैनुअल लिंक' : item.status === 'failed' ? 'विफल' : 'भेजा जा रहा है',
+        'स्थिति': (item.status === 'read' || item.readAt)
+          ? 'पढ़ा गया (Blue Tick)'
+          : (item.status === 'delivered' || item.deliveredAt)
+          ? 'डिलीवर हुआ (Double Tick)'
+          : item.status === 'sent'
+          ? 'Meta कतार / होल्ड'
+          : item.status === 'manual_link' || item.dispatchType === 'manual_whatsapp'
+          ? 'मैनुअल लिंक'
+          : item.status === 'failed'
+          ? 'विफल'
+          : 'भेजा जा रहा है',
         'Meta ID': item.providerMessageId || '',
         'त्रुटि': item.errorMessage || '',
       })));

@@ -385,24 +385,39 @@ router.post('/webhook', async (req, res) => {
               if (status === 'read') updateData.readAt = timestamp;
 
               if (status === 'failed' && statusObj.errors) {
-                updateData.errorMessage = JSON.stringify(statusObj.errors);
+                const err = statusObj.errors[0] || {};
+                const errCode = err.code;
+                const errTitle = err.title || err.message || '';
+                let errorMsg = `Meta डिलीवरी विफल (#${errCode || 'err'}): ${errTitle || 'त्रुटि'}`;
+                if (errCode === 131049 || errCode === 131056) {
+                  errorMsg = 'Meta मार्केटिंग सीमा (#131049): समान नंबर पर हाल ही में संदेश भेजा गया था, Meta ने डिलीवरी होल्ड/रोक दी।';
+                } else if (errCode === 131026) {
+                  errorMsg = 'Meta (#131026): मोबाइल नंबर WhatsApp पर मौजूद नहीं है या अमान्य है।';
+                } else if (errCode === 131047) {
+                  errorMsg = 'Meta 24-घंटे नीति (#131047): 24 घंटे का सत्र समाप्त।';
+                }
+                updateData.errorMessage = errorMsg;
               }
 
-              await SlipDispatch.updateOne(
-                { providerMessageId: messageId },
-                {
-                  $set: updateData,
-                  $set: { 'conversationHistory.$[elem].status': status },
-                },
-                {
-                  arrayFilters: [{ 'elem.messageId': messageId }]
-                }
-              ).catch(async () => {
+              try {
+                await SlipDispatch.updateOne(
+                  { providerMessageId: messageId },
+                  {
+                    $set: {
+                      ...updateData,
+                      'conversationHistory.$[elem].status': status
+                    }
+                  },
+                  {
+                    arrayFilters: [{ 'elem.messageId': messageId }]
+                  }
+                );
+              } catch (updateErr) {
                 await SlipDispatch.updateOne(
                   { providerMessageId: messageId },
                   { $set: updateData }
                 ).catch(() => {});
-              });
+              }
               
               console.log(`WhatsApp Status for [${messageId}]: ${status}`);
             }
@@ -749,7 +764,7 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
 
     res.json({
       success: true,
-      message: savedImage ? 'WhatsApp पर्ची फोटो व विवरण सफलतापूर्वक भेज दिया गया है!' : 'WhatsApp पर्ची सफलतापूर्वक भेज दी गई है।',
+      message: 'Meta API ने पर्ची स्वीकार कर ली है (वितरण कतार में)। स्थिति History पेज पर देखें।',
       dispatchId,
       providerMessageId,
       slipImageUrl: publicImageUrl,
@@ -765,6 +780,8 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
       errorDetail = err.message;
     } else if (errorCode === 131030) {
       errorDetail = `Meta टेस्ट मोड प्रतिबंध (#131030): नंबर (+91 ${recipientPhone?.slice(-10)}) Meta Developer Console की Allowed Numbers लिस्ट में नहीं है। कृपया Meta Developers Console में जाकर यह नंबर जोड़ें या फिर "डायरेक्ट WhatsApp भेजें" (1-Click) का उपयोग करें।`;
+    } else if (errorCode === 131049 || errorCode === 131056) {
+      errorDetail = 'Meta मार्केटिंग सीमा (#131049): इस नंबर पर हाल ही में संदेश भेजा जा चुका है। Meta मार्केटिंग नियमों के तहत एक ही नंबर पर बार-बार संदेश भेजने पर रोक (होल्ड) लग जाती है।';
     } else if (errorCode === 131047) {
       errorDetail = 'Meta 24-घंटे नीति (#131047): मतदाता ने पिछले 24 घंटे में आपके नंबर पर मैसेज नहीं किया है। इस नंबर पर सीधा संदेश भेजने के लिए Meta Approved Template आवश्यक है। कृपया "डायरेक्ट WhatsApp" बटन का उपयोग करें।';
     } else if (errorCode === 131026) {
@@ -772,7 +789,7 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
     } else if (errorCode === 190) {
       errorDetail = 'Meta Access Token एक्सपायर हो गया है। कृपया नया Access Token दर्ज करें।';
     } else if (errorCode === 132001) {
-      errorDetail = 'Meta Template नहीं मिला या समीक्षाधीन है। कृपया Meta Approved Template चुनें या "डायरेक्ट WhatsApp" का प्रयोग करें।';
+      errorDetail = 'Meta Template नहीं मिला या समीक्षाधीन है (#132001)। कृपया Admin पैनल में स्वीकृत Meta Template चुनें या "डायरेक्ट WhatsApp" का प्रयोग करें।';
     }
 
     if (dispatchId) {
