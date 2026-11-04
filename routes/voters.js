@@ -159,6 +159,7 @@ router.get('/all', verifyToken, requireModule('voters', 'poll-desk', 'turnout', 
     applyWardFilter(query, ward);
     
     const voters = await Voter.find(query)
+      .select('serialNo voted nameHi nameEn relativeNameHi relativeNameEn epic houseNo age gender mobileNo wardNo partNo photoUrl')
       .sort({ wardNo: 1, partNo: 1, serialNo: 1 })
       .collation({ locale: 'en', numericOrdering: true })
       .lean();
