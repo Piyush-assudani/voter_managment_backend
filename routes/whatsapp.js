@@ -462,8 +462,9 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
     const phoneNumberId = metaConfig.phoneNumberId;
     const graphApiVersion = metaConfig.graphApiVersion || 'v20.0';
 
-    if (!templateName) {
-      templateName = metaConfig.templateName;
+    // Lock strictly to the single approved Meta marketing template
+    if (!templateName || templateName !== 'voter_campaign_appeal') {
+      templateName = 'voter_campaign_appeal';
     }
 
     if (!token || !phoneNumberId) {
@@ -622,14 +623,15 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
       if (response) break;
       try {
         const components = [];
-        // Header Image (if image is available and template uses image header)
-        if (mediaId || publicImageUrl) {
+        // Header Image (IMAGE header is mandatory for voter_campaign_appeal)
+        const effectiveImageUrl = publicImageUrl || org?.slipConfig?.headerGraphicImage || 'https://images.unsplash.com/photo-1540910419892-4a36d2c3266c?auto=format&fit=crop&w=800&q=80';
+        if (mediaId || effectiveImageUrl) {
           components.push({
             type: 'header',
             parameters: [
               mediaId
                 ? { type: 'image', image: { id: mediaId } }
-                : { type: 'image', image: { link: publicImageUrl } }
+                : { type: 'image', image: { link: effectiveImageUrl } }
             ]
           });
         }
