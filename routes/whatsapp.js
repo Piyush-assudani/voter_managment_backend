@@ -623,15 +623,15 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
     let response;
     let lastError = null;
 
-    // Dynamic helper to build parameters matching template variable structure
+    // Dynamic helper to build parameters matching template variable structure (No candidate name as {{2}})
     const getParamPool = () => [
       voterName || 'मतदाता',
-      candidateName || 'माननीय प्रत्याशी',
       displayEpic || '—',
       String(ward || '—'),
       String(part || '—'),
       String(serial || '—'),
-      String(boothName || '—')
+      String(boothName || '—'),
+      candidateName || 'माननीय प्रत्याशी'
     ];
 
     const buildTemplateParams = (tmplName, customCount) => {
@@ -644,9 +644,11 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
         return selected.map(text => ({ type: 'text', text: String(text || '—') }));
       }
 
-      if (tmplName === 'chhagana_ravatarama_hudda_2') {
+      // Legacy voter_campaign_appeal uses 7 variables with candidate name
+      if (tmplName === 'voter_campaign_appeal') {
         return [
           { type: 'text', text: voterName || 'मतदाता' },
+          { type: 'text', text: candidateName || 'माननीय प्रत्याशी' },
           { type: 'text', text: displayEpic || '—' },
           { type: 'text', text: String(ward || '—') },
           { type: 'text', text: String(part || '—') },
@@ -655,10 +657,10 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
         ];
       }
 
-      // Standard 7 parameters for voter_campaign_appeal & default marketing templates
+      // Standard 6 parameters without candidate name:
+      // {{1}}=voterName, {{2}}=displayEpic, {{3}}=ward, {{4}}=part, {{5}}=serial, {{6}}=boothName
       return [
         { type: 'text', text: voterName || 'मतदाता' },
-        { type: 'text', text: candidateName || 'माननीय प्रत्याशी' },
         { type: 'text', text: displayEpic || '—' },
         { type: 'text', text: String(ward || '—') },
         { type: 'text', text: String(part || '—') },
@@ -1761,6 +1763,26 @@ router.post('/templates/test-send', verifyToken, async (req, res) => {
 
     // Sample voter slip graphic for live image preview
     const sampleImageUrl = 'https://images.unsplash.com/photo-1540910419892-4a36d2c3266c?auto=format&fit=crop&w=800&q=80';
+    const isLegacy7Param = tmplName === 'voter_campaign_appeal';
+    const sampleBodyParams = isLegacy7Param
+      ? [
+          { type: 'text', text: 'परीक्षण मतदाता' },
+          { type: 'text', text: 'माननीय प्रत्याशी' },
+          { type: 'text', text: 'TEST0000001' },
+          { type: 'text', text: '12' },
+          { type: 'text', text: '45' },
+          { type: 'text', text: '108' },
+          { type: 'text', text: 'राजकीय आदर्श विद्यालय' }
+        ]
+      : [
+          { type: 'text', text: 'परीक्षण मतदाता' },
+          { type: 'text', text: 'TEST0000001' },
+          { type: 'text', text: '12' },
+          { type: 'text', text: '45' },
+          { type: 'text', text: '108' },
+          { type: 'text', text: 'राजकीय आदर्श विद्यालय' }
+        ];
+
     const components = [
       {
         type: 'header',
@@ -1770,15 +1792,7 @@ router.post('/templates/test-send', verifyToken, async (req, res) => {
       },
       {
         type: 'body',
-        parameters: [
-          { type: 'text', text: 'परीक्षण मतदाता' },
-          { type: 'text', text: 'माननीय प्रत्याशी' },
-          { type: 'text', text: 'TEST0000001' },
-          { type: 'text', text: '12' },
-          { type: 'text', text: '45' },
-          { type: 'text', text: '108' },
-          { type: 'text', text: 'राजकीय आदर्श विद्यालय' }
-        ]
+        parameters: sampleBodyParams
       }
     ];
 
