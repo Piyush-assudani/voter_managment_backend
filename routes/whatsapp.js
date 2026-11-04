@@ -1308,26 +1308,60 @@ router.post('/templates/select-active', verifyToken, async (req, res) => {
 /**
  * Transliterate Devanagari/Hindi names to clean Meta-compliant template name (lowercase a-z, 0-9, _)
  */
-function slugifyTemplateName(raw) {
-  if (!raw) return `voter_slip_${Date.now()}`;
-  const hindiToLatin = {
-    'अ':'a','आ':'aa','इ':'i','ई':'ee','उ':'u','ऊ':'oo','ऋ':'ri','ए':'e','ऐ':'ai','ओ':'o','औ':'au','अं':'am','अः':'ah',
-    'क':'k','ख':'kh','ग':'g','घ':'gh','ङ':'ng',
-    'च':'ch','छ':'chh','ज':'j','झ':'jh','ञ':'ny',
-    'ट':'t','ठ':'th','ड':'d','ढ':'dh','ण':'n',
-    'त':'t','थ':'th','द':'d','ध':'dh','न':'n',
-    'प':'p','फ':'ph','ब':'b','भ':'bh','म':'m',
-    'य':'y','र':'r','ल':'l','व':'v','श':'sh','ष':'sh','स':'s','ह':'h',
-    'क्ष':'ksh','त्र':'tr','ज्ञ':'gya','श्र':'shr',
-    'ा':'a','ि':'i','ी':'ee','ु':'u','ू':'oo','े':'e','ै':'ai','ो':'o','ौ':'au','ं':'n','्':''
-  };
-  let converted = '';
-  for (const ch of String(raw).trim()) {
-    converted += hindiToLatin[ch] !== undefined ? hindiToLatin[ch] : ch;
+const hindiConsonants = {
+  'क':'ka','ख':'kha','ग':'ga','घ':'gha','ङ':'nga',
+  'च':'cha','छ':'chha','ज':'ja','झ':'jha','ञ':'nya',
+  'ट':'ta','ठ':'tha','ड':'da','ढ':'dha','ण':'na',
+  'त':'ta','थ':'tha','द':'da','ध':'dha','न':'na',
+  'प':'pa','फ':'pha','ब':'ba','भ':'bha','म':'ma',
+  'य':'ya','र':'ra','ल':'la','व':'va','श':'sha','ष':'sha','स':'sa','ह':'ha',
+  'क्ष':'ksha','त्र':'tra','ज्ञ':'gya','श्र':'shra'
+};
+const hindiMatras = {
+  'ा':'a','ि':'i','ी':'ee','ु':'u','ू':'oo','ृ':'ri','े':'e','ै':'ai','ो':'o','ौ':'au','ं':'n','ः':'h'
+};
+const hindiVowels = {
+  'अ':'a','आ':'aa','इ':'i','ई':'ee','उ':'u','ऊ':'oo','ऋ':'ri','ए':'e','ऐ':'ai','ओ':'o','औ':'au','अं':'am','अः':'ah'
+};
+const hindiDigits = {
+  '०':'0','१':'1','२':'2','३':'3','४':'4','५':'5','६':'6','७':'7','८':'8','९':'9'
+};
+
+function transliterateHindi(raw) {
+  if (!raw) return '';
+  let res = '';
+  const str = String(raw).trim();
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    const nextCh = str[i + 1];
+    if (hindiConsonants[ch]) {
+      if (nextCh === '्') {
+        res += hindiConsonants[ch].slice(0, -1);
+        i++;
+      } else if (hindiMatras[nextCh]) {
+        res += hindiConsonants[ch].slice(0, -1) + hindiMatras[nextCh];
+        i++;
+      } else {
+        res += hindiConsonants[ch];
+      }
+    } else if (hindiVowels[ch]) {
+      res += hindiVowels[ch];
+    } else if (hindiMatras[ch]) {
+      res += hindiMatras[ch];
+    } else if (hindiDigits[ch]) {
+      res += hindiDigits[ch];
+    } else {
+      res += ch;
+    }
   }
-  let slug = converted.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+  return res;
+}
+
+function slugifyTemplateName(raw) {
+  const roman = transliterateHindi(raw);
+  let slug = roman.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
   if (!slug || slug.length < 2) {
-    slug = `voter_slip_${Date.now()}`;
+    slug = 'voter_slip_' + Date.now();
   }
   return slug.slice(0, 50);
 }
@@ -1353,23 +1387,20 @@ router.post('/templates/create', verifyToken, async (req, res) => {
     }
 
     const cleanName = slugifyTemplateName(name);
-    const token = process.env.META_WHATSAPP_TOKEN?.trim();
-    const phoneNumberId = process.env.META_PHONE_ID?.trim();
-    const graphApiVersion = process.env.META_GRAPH_API_VERSION?.trim() || 'v20.0';
+    const metaConfig = await getEffectiveMetaConfig(req.body.organizationId || req.user.organizationId || 'org_default');
+    const token = metaConfig.token || process.env.META_WHATSAPP_TOKEN?.trim();
+    const phoneNumberId = metaConfig.phoneNumberId || process.env.META_PHONE_ID?.trim();
+    const wabaId = metaConfig.wabaId || process.env.META_WABA_ID?.trim() || '4105243026447031';
+    const graphApiVersion = metaConfig.graphApiVersion || process.env.META_GRAPH_API_VERSION?.trim() || 'v20.0';
 
     if (!token || !phoneNumberId) {
       return res.status(400).json({
-        message: 'Meta API Credentials कॉन्फ़िगर नहीं हैं। आप दिए गए स्वीकृत टेम्पलेट्स में से एक्टिव टेम्पलेट चुन सकते हैं।'
+        message: 'Meta API Credentials कॉन्फ़िगर नहीं हैं। कृपया Admin सेटिंग्स में Token व Phone ID जांचें।'
       });
     }
 
-    const phoneRes = await axios.get(
-      `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}?fields=whatsapp_business_account`,
-      { headers: { Authorization: `Bearer ${token}` }, timeout: 7000 }
-    );
-    const wabaId = phoneRes.data?.whatsapp_business_account?.id;
     if (!wabaId) {
-      return res.status(400).json({ message: 'Meta WhatsApp Business Account (WABA) नहीं मिला।' });
+      return res.status(400).json({ message: 'Meta WhatsApp Business Account (WABA ID) नहीं मिला।' });
     }
 
     const components = [];
