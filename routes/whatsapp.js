@@ -1486,16 +1486,26 @@ function normalizeBodyVariables(raw) {
     return { text: cleaned.trim(), varCount: 0, example: null };
   }
 
-  const uniqueNumbers = [];
+  // Preserve order of appearance and resequence to strict consecutive 1, 2, 3...
+  const orderOfAppearance = [];
   for (const m of matches) {
     const num = parseInt(m[1], 10);
-    if (!uniqueNumbers.includes(num)) {
-      uniqueNumbers.push(num);
+    if (!orderOfAppearance.includes(num)) {
+      orderOfAppearance.push(num);
     }
   }
 
-  uniqueNumbers.sort((a, b) => a - b);
-  const maxVar = uniqueNumbers.length;
+  const numberMapping = {};
+  orderOfAppearance.forEach((oldNum, idx) => {
+    numberMapping[oldNum] = idx + 1;
+  });
+
+  const resequencedText = cleaned.replace(/\{\{(\d+)\}\}/g, (m, g) => {
+    const num = parseInt(g, 10);
+    return `{{${numberMapping[num] || g}}}`;
+  });
+
+  const totalVars = orderOfAppearance.length;
 
   const samplePool = [
     'रमेश कुमार',
@@ -1505,17 +1515,19 @@ function normalizeBodyVariables(raw) {
     '142',
     'राजकीय उच्च प्राथमिक विद्यालय',
     'कक्ष क्रमांक 1',
-    'छगन रावतराम'
+    'छगन रावतराम',
+    'वार्ड 12',
+    'बूथ 45'
   ];
 
   const exampleRow = [];
-  for (let i = 1; i <= maxVar; i++) {
+  for (let i = 1; i <= totalVars; i++) {
     exampleRow.push(samplePool[i - 1] || `नमूना ${i}`);
   }
 
   return {
-    text: cleaned.trim(),
-    varCount: maxVar,
+    text: resequencedText.trim(),
+    varCount: totalVars,
     example: { body_text: [exampleRow] }
   };
 }
@@ -1701,26 +1713,32 @@ router.post('/templates/create', verifyToken, async (req, res) => {
         } catch (cooldownRetryErr) {
           throw cooldownRetryErr;
         }
-      } else if (errDetail.includes('example') || errDetail.includes('2388043')) {
-        // Auto-fix 2: Example missing or mismatched - auto-adjust example on BODY and retry
-        console.warn('Meta example validation error. Auto-adjusting example payload on BODY...');
+      } else if (errDetail.includes('example') || errDetail.includes('2388043') || errDetail.includes('Invalid parameter')) {
+        // Auto-fix 2: Template structure / category recovery
+        console.warn('Meta validation error on template structure or category. Auto-recovering payload...');
         const bodyIdx = metaPayload.components.findIndex(c => c.type === 'BODY');
         if (bodyIdx !== -1) {
-          if (metaPayload.components[bodyIdx].example) {
-            delete metaPayload.components[bodyIdx].example;
+          const bodyText = metaPayload.components[bodyIdx].text || '';
+          const varCount = (bodyText.match(/\{\{\d+\}\}/g) || []).length;
+          if (varCount > 0) {
+            const samplePool = ['रमेश कुमार', 'RJ17105012345', '12', '45', '142', 'राजकीय विद्यालय', 'कक्ष 1', 'छगन रावतराम'];
+            const sampleRow = [];
+            for (let i = 1; i <= varCount; i++) {
+              sampleRow.push(samplePool[i - 1] || `नमूना ${i}`);
+            }
+            metaPayload.components[bodyIdx].example = { body_text: [sampleRow] };
           } else {
-            metaPayload.components[bodyIdx].example = {
-              body_text: [['रमेश कुमार', 'RJ17105012345', '12', '45', '142', 'राजकीय विद्यालय']]
-            };
+            delete metaPayload.components[bodyIdx].example;
           }
-          createRes = await axios.post(
-            `https://graph.facebook.com/${graphApiVersion}/${wabaId}/message_templates`,
-            metaPayload,
-            { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 15000 }
-          );
-        } else {
-          throw createErr;
         }
+        if (metaPayload.category === 'UTILITY') {
+          metaPayload.category = 'MARKETING';
+        }
+        createRes = await axios.post(
+          `https://graph.facebook.com/${graphApiVersion}/${wabaId}/message_templates`,
+          metaPayload,
+          { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+        );
       } else if (metaPayload.category === 'UTILITY') {
         // Auto-fix 3: If UTILITY failed with category/parameter error, auto-retry as MARKETING
         console.warn('Meta rejected UTILITY category. Retrying automatically as MARKETING category...');
