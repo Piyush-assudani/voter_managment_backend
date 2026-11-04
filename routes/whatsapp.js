@@ -1630,8 +1630,25 @@ router.post('/templates/create', verifyToken, async (req, res) => {
         { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 15000 }
       );
     } catch (createErr) {
-      // If UTILITY failed with category/parameter error, auto-retry as MARKETING
-      if (metaPayload.category === 'UTILITY') {
+      const metaErr = createErr.response?.data?.error;
+      const errDetail = metaErr?.error_user_msg || metaErr?.message || '';
+
+      // Auto-fix 1: 1-minute deletion cooldown (Meta blocks reusing exact same name right after deleting)
+      if (errDetail.includes('less than 1 minute') || errDetail.includes('डिलीट करते समय') || errDetail.includes('recreated too quickly')) {
+        const uniqueSuffix = '_' + Math.floor(100 + Math.random() * 900);
+        metaPayload.name = (cleanName.slice(0, 45) + uniqueSuffix);
+        console.warn(`Meta 1-minute deletion cooldown hit for '${cleanName}'. Retrying with unique name '${metaPayload.name}'...`);
+        try {
+          createRes = await axios.post(
+            `https://graph.facebook.com/${graphApiVersion}/${wabaId}/message_templates`,
+            metaPayload,
+            { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+          );
+        } catch (cooldownRetryErr) {
+          throw cooldownRetryErr;
+        }
+      } else if (metaPayload.category === 'UTILITY') {
+        // Auto-fix 2: If UTILITY failed with category/parameter error, auto-retry as MARKETING
         console.warn('Meta rejected UTILITY category. Retrying automatically as MARKETING category...');
         metaPayload.category = 'MARKETING';
         createRes = await axios.post(
