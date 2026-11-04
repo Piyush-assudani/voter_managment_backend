@@ -623,8 +623,39 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
     let response;
     let lastError = null;
 
-    // Helper to build 7 parameters for Meta voter slip templates
-    const buildTemplateParams = (tmplName) => {
+    // Dynamic helper to build parameters matching template variable structure
+    const getParamPool = () => [
+      voterName || 'मतदाता',
+      candidateName || 'माननीय प्रत्याशी',
+      displayEpic || '—',
+      String(ward || '—'),
+      String(part || '—'),
+      String(serial || '—'),
+      String(boothName || '—')
+    ];
+
+    const buildTemplateParams = (tmplName, customCount) => {
+      if (customCount && typeof customCount === 'number') {
+        const pool = getParamPool();
+        const selected = pool.slice(0, customCount);
+        while (selected.length < customCount) {
+          selected.push('—');
+        }
+        return selected.map(text => ({ type: 'text', text: String(text || '—') }));
+      }
+
+      if (tmplName === 'chhagana_ravatarama_hudda_2') {
+        return [
+          { type: 'text', text: voterName || 'मतदाता' },
+          { type: 'text', text: displayEpic || '—' },
+          { type: 'text', text: String(ward || '—') },
+          { type: 'text', text: String(part || '—') },
+          { type: 'text', text: String(serial || '—') },
+          { type: 'text', text: String(boothName || '—') }
+        ];
+      }
+
+      // Standard 7 parameters for voter_campaign_appeal & default marketing templates
       return [
         { type: 'text', text: voterName || 'मतदाता' },
         { type: 'text', text: candidateName || 'माननीय प्रत्याशी' },
@@ -636,10 +667,11 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
       ];
     };
 
-    // Candidate template names to try in order of priority (Active Approved Marketing Template)
+    // Candidate template names to try in order of priority (Active Approved Marketing & Utility Templates)
     const templatesToTry = [
       templateName,
-      'voter_campaign_appeal'
+      'voter_campaign_appeal',
+      'chhagana_ravatarama_hudda_2'
     ].filter((t, idx, arr) => Boolean(t) && arr.indexOf(t) === idx);
 
     // 1. Try sending via Meta Approved Template
@@ -647,7 +679,7 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
       if (response) break;
       try {
         const components = [];
-        // Header Image (IMAGE header is mandatory for voter_campaign_appeal)
+        // Header Image (IMAGE header for voter slip)
         const effectiveImageUrl = publicImageUrl || org?.slipConfig?.headerGraphicImage || 'https://images.unsplash.com/photo-1540910419892-4a36d2c3266c?auto=format&fit=crop&w=800&q=80';
         if (mediaId || effectiveImageUrl) {
           components.push({
@@ -690,9 +722,45 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
       } catch (tmplErr) {
         lastError = tmplErr;
         const errDetail = tmplErr.response?.data?.error?.message || '';
-        console.warn(`Template [${curTemplate}] attempt failed:`, errDetail || tmplErr.message);
+        const errorData = tmplErr.response?.data?.error?.error_data?.details || '';
+        console.warn(`Template [${curTemplate}] attempt failed:`, errDetail || tmplErr.message, errorData);
 
-        // If template rejected header parameter (e.g. template does not have image header), retry without header parameter
+        // Auto-fix 1: Parameter count mismatch (#132000) - dynamically adjust param count
+        if (errDetail.includes('132000') || errDetail.includes('expected number of params') || errorData.includes('expected number of params')) {
+          const match = (errDetail + ' ' + errorData).match(/expected number of params\s*\((\d+)\)/);
+          if (match && match[1]) {
+            const expectedCount = parseInt(match[1], 10);
+            try {
+              const adjustedComponents = components.map(c => {
+                if (c.type === 'body') {
+                  return { type: 'body', parameters: buildTemplateParams(curTemplate, expectedCount) };
+                }
+                return c;
+              });
+              const adjustedPayload = {
+                ...templatePayload,
+                template: {
+                  ...templatePayload.template,
+                  components: adjustedComponents
+                }
+              };
+              const retryParamRes = await axios.post(
+                `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}/messages`,
+                adjustedPayload,
+                { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+              );
+              if (retryParamRes.data?.messages?.[0]?.id) {
+                response = retryParamRes;
+                console.log(`✅ Meta WhatsApp template [${curTemplate}] delivered after adjusting parameter count to ${expectedCount}`);
+                break;
+              }
+            } catch (retryParamErr) {
+              lastError = retryParamErr;
+            }
+          }
+        }
+
+        // Auto-fix 2: Header parameter rejected (e.g. template does not have image header)
         if (errDetail.includes('header') || errDetail.includes('parameters')) {
           try {
             const noHeaderPayload = {
@@ -1389,6 +1457,9 @@ function slugifyTemplateName(raw) {
   if (!slug || slug.length < 2) {
     slug = 'voter_slip_' + Date.now();
   }
+  if (/^[0-9_]/.test(slug)) {
+    slug = 'voter_' + slug;
+  }
   return slug.slice(0, 50);
 }
 
@@ -1436,52 +1507,43 @@ router.post('/templates/create', verifyToken, async (req, res) => {
     if (effectiveHeaderType === 'IMAGE') {
       let headerHandle = null;
       try {
-        let appId = process.env.META_APP_ID;
-        if (!appId) {
-          const appRes = await axios.get(`https://graph.facebook.com/${graphApiVersion}/app`, {
+        let appId = process.env.META_APP_ID || '2513970989412482';
+
+        // Standard sample PNG slip buffer for Meta review approval
+        const sampleSlipBuffer = Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAZAAAADIAQMAAADGqM1HAAAAA1BMVEUAAACnej3aAAAAAXRSTlMAQObYZgAAACNJREFUaN7twTEBAAAAwqD1T20ND6AAAAAAAAAAAAAAAOBnDTwAAAFxR3j8AAAAAElFTkSuQmCC',
+          'base64'
+        );
+
+        const initRes = await axios.post(
+          `https://graph.facebook.com/${graphApiVersion}/${appId}/uploads`,
+          null,
+          {
+            params: {
+              file_length: sampleSlipBuffer.length,
+              file_type: 'image/png',
+              file_name: 'voter_slip_sample.png'
+            },
             headers: { Authorization: `Bearer ${token}` },
-            timeout: 5000
-          });
-          appId = appRes.data?.id;
-        }
+            timeout: 10000
+          }
+        );
 
-        if (appId) {
-          // Standard sample PNG slip buffer for Meta review approval
-          const sampleSlipBuffer = Buffer.from(
-            'iVBORw0KGgoAAAANSUhEUgAAAZAAAADIAQMAAADGqM1HAAAAA1BMVEUAAACnej3aAAAAAXRSTlMAQObYZgAAACNJREFUaN7twTEBAAAAwqD1T20ND6AAAAAAAAAAAAAAAOBnDTwAAAFxR3j8AAAAAElFTkSuQmCC',
-            'base64'
-          );
-
-          const initRes = await axios.post(
-            `https://graph.facebook.com/${graphApiVersion}/${appId}/uploads`,
-            null,
+        const uploadSessionId = initRes.data?.id;
+        if (uploadSessionId) {
+          const uploadRes = await axios.post(
+            `https://graph.facebook.com/${graphApiVersion}/${uploadSessionId}`,
+            sampleSlipBuffer,
             {
-              params: {
-                file_length: sampleSlipBuffer.length,
-                file_type: 'image/png',
-                file_name: 'voter_slip_sample.png'
+              headers: {
+                Authorization: `OAuth ${token}`,
+                file_offset: 0,
+                'Content-Type': 'application/octet-stream'
               },
-              headers: { Authorization: `Bearer ${token}` },
-              timeout: 8000
+              timeout: 10000
             }
           );
-
-          const uploadSessionId = initRes.data?.id;
-          if (uploadSessionId) {
-            const uploadRes = await axios.post(
-              `https://graph.facebook.com/${graphApiVersion}/${uploadSessionId}`,
-              sampleSlipBuffer,
-              {
-                headers: {
-                  Authorization: `OAuth ${token}`,
-                  file_offset: 0,
-                  'Content-Type': 'application/octet-stream'
-                },
-                timeout: 8000
-              }
-            );
-            headerHandle = uploadRes.data?.h;
-          }
+          headerHandle = uploadRes.data?.h;
         }
       } catch (uploadErr) {
         console.warn('Resumable upload for template image header handle failed:', uploadErr.response?.data || uploadErr.message);
@@ -1558,11 +1620,27 @@ router.post('/templates/create', verifyToken, async (req, res) => {
 
     console.log('Submitting Meta Template:', JSON.stringify(metaPayload, null, 2));
 
-    const createRes = await axios.post(
-      `https://graph.facebook.com/${graphApiVersion}/${wabaId}/message_templates`,
-      metaPayload,
-      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 15000 }
-    );
+    let createRes;
+    try {
+      createRes = await axios.post(
+        `https://graph.facebook.com/${graphApiVersion}/${wabaId}/message_templates`,
+        metaPayload,
+        { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+      );
+    } catch (createErr) {
+      // If UTILITY failed with category/parameter error, auto-retry as MARKETING
+      if (metaPayload.category === 'UTILITY') {
+        console.warn('Meta rejected UTILITY category. Retrying automatically as MARKETING category...');
+        metaPayload.category = 'MARKETING';
+        createRes = await axios.post(
+          `https://graph.facebook.com/${graphApiVersion}/${wabaId}/message_templates`,
+          metaPayload,
+          { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+        );
+      } else {
+        throw createErr;
+      }
+    }
 
     res.json({
       success: true,
@@ -1571,8 +1649,13 @@ router.post('/templates/create', verifyToken, async (req, res) => {
       metaResponse: createRes.data
     });
   } catch (err) {
-    const errorMsg = err.response?.data?.error?.message || err.message;
-    console.error('Meta Template Creation Error:', errorMsg);
+    const metaErr = err.response?.data?.error;
+    const errorMsg =
+      metaErr?.error_user_msg ||
+      metaErr?.error_user_title ||
+      metaErr?.message ||
+      err.message;
+    console.error('Meta Template Creation Error:', metaErr || err.message);
     res.status(400).json({ message: `Meta टेम्पलेट निर्माण त्रुटि: ${errorMsg}` });
   }
 });
@@ -1725,9 +1808,48 @@ router.post('/templates/test-send', verifyToken, async (req, res) => {
         }
       );
     } catch (testErr) {
-      // If template doesn't have an image header, retry without header parameter
       const errDetail = testErr.response?.data?.error?.message || '';
-      if (errDetail.includes('header') || errDetail.includes('parameters')) {
+      const errorData = testErr.response?.data?.error?.error_data?.details || '';
+      
+      // Auto-fix: parameter count mismatch (#132000)
+      if (errDetail.includes('132000') || errDetail.includes('expected number of params') || errorData.includes('expected number of params')) {
+        const match = (errDetail + ' ' + errorData).match(/expected number of params\s*\((\d+)\)/);
+        if (match && match[1]) {
+          const expectedCount = parseInt(match[1], 10);
+          const allParams = [
+            'परीक्षण मतदाता',
+            'माननीय प्रत्याशी',
+            'TEST0000001',
+            '12',
+            '45',
+            '108',
+            'राजकीय आदर्श विद्यालय'
+          ];
+          const adjustedParams = allParams.slice(0, expectedCount).map(t => ({ type: 'text', text: t }));
+          while (adjustedParams.length < expectedCount) {
+            adjustedParams.push({ type: 'text', text: '—' });
+          }
+          const adjustedPayload = {
+            ...testPayload,
+            template: {
+              ...testPayload.template,
+              components: testPayload.template.components.map(c => c.type === 'body' ? { ...c, parameters: adjustedParams } : c)
+            }
+          };
+          try {
+            response = await axios.post(
+              `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}/messages`,
+              adjustedPayload,
+              { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+            );
+          } catch (retryParamErr) {
+            testErr = retryParamErr;
+          }
+        }
+      }
+
+      // If template doesn't have an image header, retry without header parameter
+      if (!response && (errDetail.includes('header') || errDetail.includes('parameters'))) {
         const textOnlyPayload = {
           ...testPayload,
           template: {
@@ -1747,7 +1869,7 @@ router.post('/templates/test-send', verifyToken, async (req, res) => {
             timeout: 10000
           }
         );
-      } else {
+      } else if (!response) {
         throw testErr;
       }
     }
