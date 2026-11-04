@@ -1466,6 +1466,61 @@ function slugifyTemplateName(raw) {
 }
 
 /**
+ * Normalize and extract positional variables in body text for Meta templates
+ * Handles spaces in braces ({{ 1 }}), single braces ({1}), Devanagari numerals ({{१}})
+ * and generates exact Meta-compliant example.body_text
+ */
+function normalizeBodyVariables(raw) {
+  if (!raw || typeof raw !== 'string') return { text: '', varCount: 0, example: null };
+  const hindiToAscii = { '०':'0','१':'1','२':'2','३':'3','४':'4','५':'5','६':'6','७':'7','८':'8','९':'9' };
+  let cleaned = raw.replace(/\{+([०-९0-9\s]+)\}+/g, (m, g) => {
+    let digits = '';
+    for (const c of g.trim()) {
+      digits += hindiToAscii[c] !== undefined ? hindiToAscii[c] : c;
+    }
+    return '{{' + digits + '}}';
+  });
+
+  const matches = [...cleaned.matchAll(/\{\{(\d+)\}\}/g)];
+  if (!matches || matches.length === 0) {
+    return { text: cleaned.trim(), varCount: 0, example: null };
+  }
+
+  const uniqueNumbers = [];
+  for (const m of matches) {
+    const num = parseInt(m[1], 10);
+    if (!uniqueNumbers.includes(num)) {
+      uniqueNumbers.push(num);
+    }
+  }
+
+  uniqueNumbers.sort((a, b) => a - b);
+  const maxVar = uniqueNumbers.length;
+
+  const samplePool = [
+    'रमेश कुमार',
+    'RJ17105012345',
+    '12',
+    '45',
+    '142',
+    'राजकीय उच्च प्राथमिक विद्यालय',
+    'कक्ष क्रमांक 1',
+    'छगन रावतराम'
+  ];
+
+  const exampleRow = [];
+  for (let i = 1; i <= maxVar; i++) {
+    exampleRow.push(samplePool[i - 1] || `नमूना ${i}`);
+  }
+
+  return {
+    text: cleaned.trim(),
+    varCount: maxVar,
+    example: { body_text: [exampleRow] }
+  };
+}
+
+/**
  * POST /api/whatsapp/templates/create - Submit new template to Meta Cloud API (Supports Image Header, Text Header, Buttons)
  */
 router.post('/templates/create', verifyToken, async (req, res) => {
@@ -1564,15 +1619,14 @@ router.post('/templates/create', verifyToken, async (req, res) => {
       });
     }
 
-    // 2. BODY COMPONENT
-    const params = bodyText.match(/\{\{\d+\}\}/g);
-    const exampleBody = params ? params.map((_, idx) => `नमूना मान ${idx + 1}`) : [];
-
-    components.push({
+    // 2. BODY COMPONENT (Strictly normalized for Meta WhatsApp Cloud API)
+    const normalizedBody = normalizeBodyVariables(bodyText);
+    const bodyComponent = {
       type: 'BODY',
-      text: bodyText.trim(),
-      ...(exampleBody.length > 0 ? { example: { body_text: [exampleBody] } } : {})
-    });
+      text: normalizedBody.text,
+      ...(normalizedBody.example ? { example: normalizedBody.example } : {})
+    };
+    components.push(bodyComponent);
 
     // 3. FOOTER COMPONENT
     if (footerText && footerText.trim()) {
@@ -1647,8 +1701,28 @@ router.post('/templates/create', verifyToken, async (req, res) => {
         } catch (cooldownRetryErr) {
           throw cooldownRetryErr;
         }
+      } else if (errDetail.includes('example') || errDetail.includes('2388043')) {
+        // Auto-fix 2: Example missing or mismatched - auto-adjust example on BODY and retry
+        console.warn('Meta example validation error. Auto-adjusting example payload on BODY...');
+        const bodyIdx = metaPayload.components.findIndex(c => c.type === 'BODY');
+        if (bodyIdx !== -1) {
+          if (metaPayload.components[bodyIdx].example) {
+            delete metaPayload.components[bodyIdx].example;
+          } else {
+            metaPayload.components[bodyIdx].example = {
+              body_text: [['रमेश कुमार', 'RJ17105012345', '12', '45', '142', 'राजकीय विद्यालय']]
+            };
+          }
+          createRes = await axios.post(
+            `https://graph.facebook.com/${graphApiVersion}/${wabaId}/message_templates`,
+            metaPayload,
+            { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+          );
+        } else {
+          throw createErr;
+        }
       } else if (metaPayload.category === 'UTILITY') {
-        // Auto-fix 2: If UTILITY failed with category/parameter error, auto-retry as MARKETING
+        // Auto-fix 3: If UTILITY failed with category/parameter error, auto-retry as MARKETING
         console.warn('Meta rejected UTILITY category. Retrying automatically as MARKETING category...');
         metaPayload.category = 'MARKETING';
         createRes = await axios.post(
