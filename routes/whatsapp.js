@@ -1201,7 +1201,8 @@ router.get('/templates', verifyToken, async (req, res) => {
             metaTemplates = tmplRes.data.data.map(t => ({
               ...t,
               hasImageHeader: Boolean(t.components?.some(c => (c.type === 'HEADER' || c.type === 'header') && (c.format === 'IMAGE' || c.format === 'image'))),
-              headerFormat: t.components?.find(c => c.type === 'HEADER' || c.type === 'header')?.format || 'TEXT'
+              headerFormat: t.components?.find(c => c.type === 'HEADER' || c.type === 'header')?.format || 'TEXT',
+              buttons: t.components?.find(c => c.type === 'BUTTONS' || c.type === 'buttons')?.buttons || []
             }));
             isLiveFromMeta = true;
           }
@@ -1305,16 +1306,53 @@ router.post('/templates/select-active', verifyToken, async (req, res) => {
 });
 
 /**
- * POST /api/whatsapp/templates/create - Submit new template to Meta Cloud API
+ * Transliterate Devanagari/Hindi names to clean Meta-compliant template name (lowercase a-z, 0-9, _)
+ */
+function slugifyTemplateName(raw) {
+  if (!raw) return `voter_slip_${Date.now()}`;
+  const hindiToLatin = {
+    'अ':'a','आ':'aa','इ':'i','ई':'ee','उ':'u','ऊ':'oo','ऋ':'ri','ए':'e','ऐ':'ai','ओ':'o','औ':'au','अं':'am','अः':'ah',
+    'क':'k','ख':'kh','ग':'g','घ':'gh','ङ':'ng',
+    'च':'ch','छ':'chh','ज':'j','झ':'jh','ञ':'ny',
+    'ट':'t','ठ':'th','ड':'d','ढ':'dh','ण':'n',
+    'त':'t','थ':'th','द':'d','ध':'dh','न':'n',
+    'प':'p','फ':'ph','ब':'b','भ':'bh','म':'m',
+    'य':'y','र':'r','ल':'l','व':'v','श':'sh','ष':'sh','स':'s','ह':'h',
+    'क्ष':'ksh','त्र':'tr','ज्ञ':'gya','श्र':'shr',
+    'ा':'a','ि':'i','ी':'ee','ु':'u','ू':'oo','े':'e','ै':'ai','ो':'o','ौ':'au','ं':'n','्':''
+  };
+  let converted = '';
+  for (const ch of String(raw).trim()) {
+    converted += hindiToLatin[ch] !== undefined ? hindiToLatin[ch] : ch;
+  }
+  let slug = converted.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+  if (!slug || slug.length < 2) {
+    slug = `voter_slip_${Date.now()}`;
+  }
+  return slug.slice(0, 50);
+}
+
+/**
+ * POST /api/whatsapp/templates/create - Submit new template to Meta Cloud API (Supports Image Header, Text Header, Buttons)
  */
 router.post('/templates/create', verifyToken, async (req, res) => {
   try {
-    const { name, category, language, bodyText, headerText, footerText } = req.body;
+    const {
+      name,
+      category,
+      language,
+      headerType, // 'IMAGE' | 'TEXT' | 'NONE'
+      headerText,
+      bodyText,
+      footerText,
+      buttons // Array of { type: 'QUICK_REPLY' | 'PHONE_NUMBER' | 'URL', text: '...', phone_number?: '...', url?: '...' }
+    } = req.body;
+
     if (!name || !bodyText) {
       return res.status(400).json({ message: 'टेम्पलेट का नाम और बॉडी टेक्स्ट आवश्यक है।' });
     }
 
-    const cleanName = name.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
+    const cleanName = slugifyTemplateName(name);
     const token = process.env.META_WHATSAPP_TOKEN?.trim();
     const phoneNumberId = process.env.META_PHONE_ID?.trim();
     const graphApiVersion = process.env.META_GRAPH_API_VERSION?.trim() || 'v20.0';
@@ -1327,7 +1365,7 @@ router.post('/templates/create', verifyToken, async (req, res) => {
 
     const phoneRes = await axios.get(
       `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}?fields=whatsapp_business_account`,
-      { headers: { Authorization: `Bearer ${token}` } }
+      { headers: { Authorization: `Bearer ${token}` }, timeout: 7000 }
     );
     const wabaId = phoneRes.data?.whatsapp_business_account?.id;
     if (!wabaId) {
@@ -1335,39 +1373,144 @@ router.post('/templates/create', verifyToken, async (req, res) => {
     }
 
     const components = [];
-    if (headerText) {
-      components.push({ type: 'HEADER', format: 'TEXT', text: headerText });
+
+    // 1. HEADER COMPONENT (IMAGE, TEXT, or NONE)
+    const effectiveHeaderType = (headerType || 'IMAGE').toUpperCase();
+    if (effectiveHeaderType === 'IMAGE') {
+      let headerHandle = null;
+      try {
+        let appId = process.env.META_APP_ID;
+        if (!appId) {
+          const appRes = await axios.get(`https://graph.facebook.com/${graphApiVersion}/app`, {
+            headers: { Authorization: `Bearer ${token}` },
+            timeout: 5000
+          });
+          appId = appRes.data?.id;
+        }
+
+        if (appId) {
+          // Standard sample PNG slip buffer for Meta review approval
+          const sampleSlipBuffer = Buffer.from(
+            'iVBORw0KGgoAAAANSUhEUgAAAZAAAADIAQMAAADGqM1HAAAAA1BMVEUAAACnej3aAAAAAXRSTlMAQObYZgAAACNJREFUaN7twTEBAAAAwqD1T20ND6AAAAAAAAAAAAAAAOBnDTwAAAFxR3j8AAAAAElFTkSuQmCC',
+            'base64'
+          );
+
+          const initRes = await axios.post(
+            `https://graph.facebook.com/${graphApiVersion}/${appId}/uploads`,
+            null,
+            {
+              params: {
+                file_length: sampleSlipBuffer.length,
+                file_type: 'image/png',
+                file_name: 'voter_slip_sample.png'
+              },
+              headers: { Authorization: `Bearer ${token}` },
+              timeout: 8000
+            }
+          );
+
+          const uploadSessionId = initRes.data?.id;
+          if (uploadSessionId) {
+            const uploadRes = await axios.post(
+              `https://graph.facebook.com/${graphApiVersion}/${uploadSessionId}`,
+              sampleSlipBuffer,
+              {
+                headers: {
+                  Authorization: `OAuth ${token}`,
+                  file_offset: 0,
+                  'Content-Type': 'application/octet-stream'
+                },
+                timeout: 8000
+              }
+            );
+            headerHandle = uploadRes.data?.h;
+          }
+        }
+      } catch (uploadErr) {
+        console.warn('Resumable upload for template image header handle failed:', uploadErr.response?.data || uploadErr.message);
+      }
+
+      components.push({
+        type: 'HEADER',
+        format: 'IMAGE',
+        ...(headerHandle ? { example: { header_handle: [headerHandle] } } : {})
+      });
+    } else if (effectiveHeaderType === 'TEXT' && headerText && headerText.trim()) {
+      components.push({
+        type: 'HEADER',
+        format: 'TEXT',
+        text: headerText.trim()
+      });
     }
-    
+
+    // 2. BODY COMPONENT
     const params = bodyText.match(/\{\{\d+\}\}/g);
     const exampleBody = params ? params.map((_, idx) => `नमूना मान ${idx + 1}`) : [];
 
     components.push({
       type: 'BODY',
-      text: bodyText,
+      text: bodyText.trim(),
       ...(exampleBody.length > 0 ? { example: { body_text: [exampleBody] } } : {})
     });
 
-    if (footerText) {
-      components.push({ type: 'FOOTER', text: footerText });
+    // 3. FOOTER COMPONENT
+    if (footerText && footerText.trim()) {
+      components.push({ type: 'FOOTER', text: footerText.trim() });
+    }
+
+    // 4. BUTTONS COMPONENT
+    if (Array.isArray(buttons) && buttons.length > 0) {
+      const validButtons = buttons
+        .filter((b) => b && b.text && String(b.text).trim())
+        .map((b) => {
+          const type = (b.type || 'QUICK_REPLY').toUpperCase();
+          if (type === 'PHONE_NUMBER') {
+            return {
+              type: 'PHONE_NUMBER',
+              text: String(b.text).trim().slice(0, 25),
+              phone_number: String(b.phone_number || '+919413879444').trim()
+            };
+          }
+          if (type === 'URL') {
+            return {
+              type: 'URL',
+              text: String(b.text).trim().slice(0, 25),
+              url: String(b.url || 'https://vijaysetu.com').trim()
+            };
+          }
+          return {
+            type: 'QUICK_REPLY',
+            text: String(b.text).trim().slice(0, 25)
+          };
+        });
+
+      if (validButtons.length > 0) {
+        components.push({
+          type: 'BUTTONS',
+          buttons: validButtons
+        });
+      }
     }
 
     const metaPayload = {
       name: cleanName,
-      category: category || 'UTILITY',
+      category: category || 'MARKETING',
       language: language || 'hi',
       components
     };
 
+    console.log('Submitting Meta Template:', JSON.stringify(metaPayload, null, 2));
+
     const createRes = await axios.post(
       `https://graph.facebook.com/${graphApiVersion}/${wabaId}/message_templates`,
       metaPayload,
-      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
+      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 15000 }
     );
 
     res.json({
       success: true,
-      message: `Meta टेम्पलेट '${cleanName}' सफलतापूर्वक सबमिट कर दिया गया।`,
+      cleanName,
+      message: `Meta टेम्पलेट '${cleanName}' सफलतापूर्वक सबमिट कर दिया गया! Meta द्वारा समीक्षा (Review) में 1-5 मिनट लग सकते हैं।`,
       metaResponse: createRes.data
     });
   } catch (err) {
@@ -1404,6 +1547,7 @@ router.post('/templates/test-send', verifyToken, async (req, res) => {
     const tmplName = templateName || metaConfig.templateName || 'voter_campaign_appeal';
     const lang = templateLanguage || metaConfig.templateLanguage || 'hi';
 
+    // Sample voter slip graphic for live image preview
     const sampleImageUrl = 'https://images.unsplash.com/photo-1540910419892-4a36d2c3266c?auto=format&fit=crop&w=800&q=80';
     const components = [
       {
@@ -1438,22 +1582,51 @@ router.post('/templates/test-send', verifyToken, async (req, res) => {
       }
     };
 
-    const response = await axios.post(
-      `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}/messages`,
-      testPayload,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 10000
+    let response = null;
+    try {
+      response = await axios.post(
+        `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}/messages`,
+        testPayload,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 10000
+        }
+      );
+    } catch (testErr) {
+      // If template doesn't have an image header, retry without header parameter
+      const errDetail = testErr.response?.data?.error?.message || '';
+      if (errDetail.includes('header') || errDetail.includes('parameters')) {
+        const textOnlyPayload = {
+          ...testPayload,
+          template: {
+            name: tmplName,
+            language: { code: lang },
+            components: components.filter(c => c.type === 'body')
+          }
+        };
+        response = await axios.post(
+          `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}/messages`,
+          textOnlyPayload,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json'
+            },
+            timeout: 10000
+          }
+        );
+      } else {
+        throw testErr;
       }
-    );
+    }
 
     res.json({
       success: true,
       message: `परीक्षण संदेश ${phoneNumber} पर सफलतापूर्वक भेजा गया!`,
-      messageId: response.data?.messages?.[0]?.id
+      messageId: response?.data?.messages?.[0]?.id
     });
   } catch (err) {
     const errorMsg = err.response?.data?.error?.message || err.message;
