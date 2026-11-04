@@ -689,7 +689,33 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
         }
       } catch (tmplErr) {
         lastError = tmplErr;
-        console.warn(`Template [${curTemplate}] attempt failed:`, tmplErr.response?.data?.error?.message || tmplErr.message);
+        const errDetail = tmplErr.response?.data?.error?.message || '';
+        console.warn(`Template [${curTemplate}] attempt failed:`, errDetail || tmplErr.message);
+
+        // If template rejected header parameter (e.g. template does not have image header), retry without header parameter
+        if (errDetail.includes('header') || errDetail.includes('parameters')) {
+          try {
+            const noHeaderPayload = {
+              ...templatePayload,
+              template: {
+                ...templatePayload.template,
+                components: components.filter((c) => c.type === 'body')
+              }
+            };
+            const retryRes = await axios.post(
+              `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}/messages`,
+              noHeaderPayload,
+              { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+            );
+            if (retryRes.data?.messages?.[0]?.id) {
+              response = retryRes;
+              console.log(`✅ Meta WhatsApp template [${curTemplate}] delivered without header to ${recipientPhone}`);
+              break;
+            }
+          } catch (retryErr) {
+            lastError = retryErr;
+          }
+        }
       }
     }
 
@@ -1548,6 +1574,78 @@ router.post('/templates/create', verifyToken, async (req, res) => {
     const errorMsg = err.response?.data?.error?.message || err.message;
     console.error('Meta Template Creation Error:', errorMsg);
     res.status(400).json({ message: `Meta टेम्पलेट निर्माण त्रुटि: ${errorMsg}` });
+  }
+});
+
+/**
+ * DELETE /api/whatsapp/templates/:name - Delete template from Meta Cloud API
+ */
+router.delete('/templates/:name', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const templateName = req.params.name;
+    if (!templateName) {
+      return res.status(400).json({ message: 'हटाने के लिए टेम्पलेट का नाम आवश्यक है।' });
+    }
+
+    const orgId = req.query.organizationId || req.user.organizationId || 'org_default';
+    const metaConfig = await getEffectiveMetaConfig(orgId);
+    const token = metaConfig.token || process.env.META_WHATSAPP_TOKEN?.trim();
+    const wabaId = metaConfig.wabaId || process.env.META_WABA_ID?.trim() || '4105243026447031';
+    const graphApiVersion = metaConfig.graphApiVersion || process.env.META_GRAPH_API_VERSION?.trim() || 'v20.0';
+
+    if (!token || !wabaId) {
+      return res.status(400).json({ message: 'Meta WABA ID या Access Token कॉन्फ़िगर नहीं है।' });
+    }
+
+    let metaDeleted = false;
+    let metaResponse = null;
+    try {
+      const delRes = await axios.delete(
+        `https://graph.facebook.com/${graphApiVersion}/${wabaId}/message_templates`,
+        {
+          params: { name: templateName },
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 10000
+        }
+      );
+      metaDeleted = true;
+      metaResponse = delRes.data;
+    } catch (metaErr) {
+      const msg = metaErr.response?.data?.error?.message || metaErr.message;
+      console.warn(`Meta template delete warning for [${templateName}]:`, msg);
+    }
+
+    // Unset active template in org if it was set to this deleted template
+    if (orgId) {
+      const org = await Organization.findById(orgId);
+      if (org) {
+        let modified = false;
+        if (org.whatsappConfig?.templateName === templateName) {
+          org.whatsappConfig.templateName = 'voter_campaign_appeal';
+          modified = true;
+        }
+        if (org.slipConfig?.whatsappTemplateName === templateName) {
+          org.slipConfig.whatsappTemplateName = 'voter_campaign_appeal';
+          modified = true;
+        }
+        if (modified) {
+          org.markModified('whatsappConfig');
+          org.markModified('slipConfig');
+          await org.save();
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Meta टेम्पलेट '${templateName}' सफलतापूर्वक हटा दिया गया।`,
+      metaDeleted,
+      metaResponse
+    });
+  } catch (err) {
+    const errorMsg = err.response?.data?.error?.message || err.message;
+    console.error('Template deletion error:', errorMsg);
+    res.status(500).json({ message: `टेम्पलेट हटाने में त्रुटि: ${errorMsg}` });
   }
 });
 
