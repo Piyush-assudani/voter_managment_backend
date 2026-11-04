@@ -462,9 +462,9 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
     const phoneNumberId = metaConfig.phoneNumberId;
     const graphApiVersion = metaConfig.graphApiVersion || 'v20.0';
 
-    // Lock strictly to the single approved Meta marketing template
-    if (!templateName || templateName !== 'voter_campaign_appeal') {
-      templateName = 'voter_campaign_appeal';
+    // Use template selected by Admin or passed from client, falling back to effective org template
+    if (!templateName) {
+      templateName = metaConfig.templateName || 'voter_campaign_appeal';
     }
 
     if (!token || !phoneNumberId) {
