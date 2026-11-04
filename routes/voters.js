@@ -988,7 +988,8 @@ router.put('/:id', verifyToken, (req, res, next) => {
           updates[dbColumn] = !isNaN(numSerial) && numSerial > 0 ? numSerial : null;
         } else if (key === 'phone' || key === 'mobileNo') {
           const cleanPh = normalizeDevanagariDigits(String(val || '')).replace(/\D/g, '').slice(-10);
-          updates[dbColumn] = cleanPh;
+          updates.mobileNo = cleanPh;
+          updates.phone = cleanPh;
         } else if (key === 'voted' || key === 'isMigrant') {
           updates[dbColumn] = Boolean(val);
         } else if (key === 'nameHi' && typeof val === 'string') {

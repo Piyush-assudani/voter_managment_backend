@@ -527,6 +527,15 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
       return res.status(404).json({ message: 'मतदाता रिकॉर्ड नहीं मिला।' });
     }
 
+    // Persist phone number to Voter record in DB so it is permanently remembered
+    const cleanPhoneDigits = recipientPhone.slice(-10);
+    if (cleanPhoneDigits && cleanPhoneDigits.length === 10) {
+      await Voter.updateOne(
+        { _id: dbVoter._id },
+        { $set: { phone: cleanPhoneDigits, mobileNo: cleanPhoneDigits } }
+      ).catch(() => {});
+    }
+
     const org = await Organization.findById(orgId).lean();
     const candidateName = (
       req.body.candidateName ||
@@ -834,6 +843,15 @@ router.post('/send-manual', verifyToken, requireModule('voters'), async (req, re
     if (!dbVoter) {
       await refundCredit(orgId);
       return res.status(404).json({ message: 'मतदाता रिकॉर्ड नहीं मिला।' });
+    }
+
+    // Persist phone number to Voter record in DB so it is permanently remembered
+    const cleanPhoneDigits = recipientPhone.slice(-10);
+    if (cleanPhoneDigits && cleanPhoneDigits.length === 10) {
+      await Voter.updateOne(
+        { _id: dbVoter._id },
+        { $set: { phone: cleanPhoneDigits, mobileNo: cleanPhoneDigits } }
+      ).catch(() => {});
     }
 
     const org = await Organization.findById(orgId).lean();
