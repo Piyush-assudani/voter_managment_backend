@@ -11,7 +11,10 @@ const { predictCaste, cleanVillageOrSectionName } = require('../lib/fuzzyNameMat
 const cache = require('../lib/cache');
 
 const router = express.Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024, files: 10 },
+});
 const availableModules = ['voters', 'poll-desk', 'turnout', 'warroom', 'history', 'community', 'workers', 'migrants'];
 const allModules = [...availableModules, 'accounts'];
 const workbookType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -1080,8 +1083,23 @@ router.get('/import-template.xlsx', verifyToken, isAdmin, async (_req, res) => {
   }
 });
 
-router.post('/upload-voters', verifyToken, isAdmin, upload.single('file'), async (req, res) => {
-  if (!req.file || !req.file.buffer) return res.status(400).json({ message: 'No valid file uploaded.' });
+router.post(
+  '/upload-voters',
+  verifyToken,
+  isAdmin,
+  upload.fields([{ name: 'file', maxCount: 1 }, { name: 'files', maxCount: 10 }]),
+  async (req, res) => {
+  const uploadedFiles = [
+    ...(req.files?.file || []),
+    ...(req.files?.files || []),
+  ];
+  if (uploadedFiles.length === 0 || uploadedFiles.some((file) => !file.buffer)) {
+    return res.status(400).json({ message: 'No valid Excel files uploaded.' });
+  }
+  const totalUploadBytes = uploadedFiles.reduce((total, file) => total + file.size, 0);
+  if (totalUploadBytes > 100 * 1024 * 1024) {
+    return res.status(413).json({ message: 'Combined Excel upload size cannot exceed 100 MB.' });
+  }
   const organizationId = typeof req.body.organizationId === 'string' && req.body.organizationId.trim()
     ? req.body.organizationId.trim()
     : 'org_default';
@@ -1093,14 +1111,6 @@ router.post('/upload-voters', verifyToken, isAdmin, upload.single('file'), async
   const defaultBoothNo = typeof req.body.boothNo === 'string' ? req.body.boothNo.trim() : '';
   const defaultUploadedBy = typeof req.body.uploadedBy === 'string' ? req.body.uploadedBy.trim() : '';
   const defaultDescription = typeof req.body.listDescription === 'string' ? req.body.listDescription.trim() : '';
-
-  // Auto register ward if provided
-  if (defaultWardNo) {
-    await Organization.updateOne(
-      { _id: organizationId },
-      { $addToSet: { wards: defaultWardNo } }
-    ).catch(err => console.error('Error adding ward to org:', err));
-  }
 
   const extractCellValue = (cell) => {
     if (!cell) return '';
@@ -1117,10 +1127,14 @@ router.post('/upload-voters', verifyToken, isAdmin, upload.single('file'), async
   };
 
   try {
+    const batch = [];
+    for (const uploadedFile of uploadedFiles) {
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(req.file.buffer);
+    await workbook.xlsx.load(uploadedFile.buffer);
     const worksheet = workbook.getWorksheet('Voters') || workbook.getWorksheet('मतदाता सूची') || workbook.worksheets[0];
-    if (!worksheet) return res.status(400).json({ message: 'The uploaded Excel file has no worksheets.' });
+    if (!worksheet) {
+      return res.status(400).json({ message: `Excel file "${uploadedFile.originalname}" has no worksheets.` });
+    }
 
     // Dynamic Header Detection
     const headerRow = worksheet.getRow(1);
@@ -1263,7 +1277,8 @@ router.post('/upload-voters', verifyToken, isAdmin, upload.single('file'), async
       let gender = cellText('gender', 8);
       if (['m', 'male', 'पुरुष'].includes(gender.toLowerCase())) gender = 'पुरुष';
       else if (['f', 'female', 'स्त्री', 'महिला'].includes(gender.toLowerCase())) gender = 'स्त्री';
-      else gender = gender || 'अन्य';
+      else if (['other', 'अन्य'].includes(gender.toLowerCase())) gender = 'अन्य';
+      else gender = '';
 
       const voter = {
         epic,
@@ -1292,16 +1307,19 @@ router.post('/upload-voters', verifyToken, isAdmin, upload.single('file'), async
       return voter;
     };
 
-    const batch = [];
+    const fileRecordCount = batch.length;
     worksheet.eachRow((row, rowNumber) => {
       if (rowNumber === 1) return;
       const voter = parseRow(row, rowNumber);
       if (voter) batch.push(voter);
     });
 
-    if (batch.length === 0) return res.status(400).json({ message: 'No valid voter records found in file.' });
+    if (batch.length === fileRecordCount) {
+      return res.status(400).json({ message: `No valid voter records found in "${uploadedFile.originalname}".` });
+    }
+    }
 
-    // Track all detected wards in the batch
+    // Validate every workbook before writing so a bad file cannot partially import the batch.
     const detectedWards = new Set();
     if (defaultWardNo) detectedWards.add(defaultWardNo);
     batch.forEach(v => { if (v.wardNo) detectedWards.add(v.wardNo); });
@@ -1399,7 +1417,7 @@ router.post('/upload-voters', verifyToken, isAdmin, upload.single('file'), async
         const jobId = crypto.randomUUID();
         adminPdfRouter.uploadJobs.set(jobId, {
           id: jobId,
-          filename: req.file.originalname,
+          filename: uploadedFiles.map((file) => file.originalname).join(', '),
           fileType: 'excel',
           organizationId,
           wardNo: defaultWardNo,
@@ -1421,6 +1439,7 @@ router.post('/upload-voters', verifyToken, isAdmin, upload.single('file'), async
       inserted,
       updated,
       count: inserted + updated,
+      fileCount: uploadedFiles.length,
       wardNo: defaultWardNo,
       boothNo: defaultBoothNo,
       uploadedBy: defaultUploadedBy,
@@ -1430,7 +1449,8 @@ router.post('/upload-voters', verifyToken, isAdmin, upload.single('file'), async
     console.error('Excel processing error:', err);
     res.status(500).json({ message: 'Error processing the Excel file. Check the format.' });
   }
-});
+  }
+);
 
 router.get('/export-voters', verifyToken, isAdmin, async (req, res) => {
   try {

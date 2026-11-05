@@ -705,7 +705,7 @@ def parse_voters_from_page(text, ward_no):
                 ag_re = re.compile(r'आजच:\s*(\d+)\s*ललग:\s*(\S+)')
                 for m in ag_re.finditer(clean):
                     age = int(m.group(1))
-                    gender = GENDER_MAP.get(m.group(2), 'पुरुष')
+                    gender = GENDER_MAP.get(m.group(2), '')
                     age_genders.append((age, gender))
                 continue
                 
@@ -715,8 +715,8 @@ def parse_voters_from_page(text, ward_no):
             rtype = relations[idx][0] if idx < len(relations) else 'पिता'
             rname = relations[idx][1] if idx < len(relations) else ''
             house = houses[idx] if idx < len(houses) else ''
-            age = age_genders[idx][0] if idx < len(age_genders) else 0
-            gender = age_genders[idx][1] if idx < len(age_genders) else ('स्त्री' if rtype == 'पति' else 'पुरुष')
+            age = age_genders[idx][0] if idx < len(age_genders) else None
+            gender = age_genders[idx][1] if idx < len(age_genders) else ('स्त्री' if rtype == 'पति' else '')
             
             if rtype == 'पति':
                 gender = 'स्त्री'

@@ -501,7 +501,7 @@ def parse_cards_from_page(text, ward_no, booth_no):
                 for m in ag_re.finditer(clean):
                     age = int(m.group(1))
                     g_tok = m.group(2) or ''
-                    gender = GENDER_MAP.get(g_tok, 'पुरुष')
+                    gender = GENDER_MAP.get(g_tok, '')
                     age_genders.append((age, gender))
                 continue
                 
@@ -518,8 +518,8 @@ def parse_cards_from_page(text, ward_no, booth_no):
             if not h_no or h_no in ['0', '00']:
                 h_no = '-'
                 
-            age = age_genders[idx][0] if idx < len(age_genders) else 30
-            gender = age_genders[idx][1] if idx < len(age_genders) else ('स्त्री' if rtype == 'पति' else 'पुरुष')
+            age = age_genders[idx][0] if idx < len(age_genders) else None
+            gender = age_genders[idx][1] if idx < len(age_genders) else ('स्त्री' if rtype == 'पति' else '')
             if rtype == 'पति':
                 gender = 'स्त्री'
                 

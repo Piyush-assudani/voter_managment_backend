@@ -374,7 +374,7 @@ const ExcelJS = require('exceljs');
             } else if (['देवी', 'कुमारी', 'बाई', 'बेगम', 'कंवर', 'श्रीमती'].some(fem => cleanName.includes(fem))) {
               genderVal = 'स्त्री';
             } else if (!['पुरुष', 'स्त्री'].includes(genderVal)) {
-              genderVal = 'पुरुष';
+              genderVal = '';
             }
 
             const villageEn = cleanVillageOrSectionName(cellVal(row, 'villageName', 17));
@@ -444,7 +444,7 @@ const ExcelJS = require('exceljs');
               relationType: 'पिता',
               houseNo: finalHouse,
               age: null,
-              gender: 'पुरुष',
+              gender: '',
               status: 'Unreadable',
               wardNo: String(rowWard).trim(),
               panchayat: String(rowPanchayat).trim(),

@@ -120,6 +120,15 @@ class PdfCorrectionProfileTests(unittest.TestCase):
         self.assertEqual(record["house_no"], "17")
         self.assertEqual(record["age"], 42)
 
+    def test_missing_age_and_gender_are_not_guessed(self):
+        page = "1 RJ/08/061/459531"
+        regional_record = maulasar_extractor.parse_voters_from_page(page, "13")[0]
+        generic_record = extractor.parse_cards_from_page(page, "13", "1")[0]
+
+        for record in (regional_record, generic_record):
+            self.assertIsNone(record["age"])
+            self.assertEqual(record["gender"], "")
+
 
 if __name__ == "__main__":
     unittest.main()
