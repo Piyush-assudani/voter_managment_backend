@@ -216,30 +216,28 @@ def parse_full_card_tess(text: str) -> Dict[str, Any]:
         if not l:
             continue
 
-        nm = re.search(r'(?:मतदाता\s*(?:का|कर)?\s*)?(?:नाम|नरम)\s*[:ः\-\s]+(.+)', l)
-        if nm and not re.search(r'पिता|पति|माता|अन्य|पनत|नपतर|मरतर', l) and not name:
+        nm = re.search(r'(?:मतदाता\s*(?:का)?\s*)?नाम\s*[:ः\-\s]+(.+)', l)
+        if nm and not re.search(r'पिता|पति|माता|अन्य|पनत|नपतर', l) and not name:
             c = clean_hindi_name(nm.group(1))
             if c and c != 'मतदाता':
                 name = c
 
-        rm = re.search(r'(पिता|पति|माता|अन्य|पनत|नपतर|मरतर)\s*(?:का|कर)?\s*(?:नाम|नरम)\s*[:ः\-\s]*(.+)', l)
+        rm = re.search(r'(पिता|पति|माता|अन्य|पनत|नपतर)\s*(?:का)?\s*नाम\s*[:ः\-\s]*(.+)', l)
         if rm and not rel_name:
             rt = rm.group(1)
             if rt == 'पनत':
                 rt = 'पति'
             elif rt == 'नपतर':
                 rt = 'पिता'
-            elif rt == 'मरतर':
-                rt = 'माता'
             rel_type = rt
             c = clean_hindi_name(rm.group(2))
             if c:
                 rel_name = c
 
-        hm = re.search(r'(?:मकान|गृह|मकारन|मकरन|म\s*[\.०]?\s*सं|म\s*[\.०]?\s*क्र|H(?:ouse)?\.?\s*No\.?)\s*(?:संख्या|नंबर|नं|क्रं|सपखजर)?\s*[:ः\-\s]*(.+)', l)
+        hm = re.search(r'(?:मकान|गृह|मकारन|म\s*[\.०]?\s*सं|म\s*[\.०]?\s*क्र|H(?:ouse)?\.?\s*No\.?)\s*(?:संख्या|नंबर|नं|क्रं|सपखजर)?\s*[:ः\-\s]*(.+)', l)
         if hm and not house:
             raw_c = hm.group(1).strip()
-            raw_c = re.split(r'\b(?:आयु|उम्र|आजच|आय|लिंग|सलग|ललग|जेंडर|Sex|फोटो|उपलब्ध|विलोपित|DELETED)\b', raw_c, flags=re.IGNORECASE)[0].strip()
+            raw_c = re.split(r'\b(?:आयु|उम्र|आजच|आय|लिंग|सलग|जेंडर|Sex|फोटो|उपलब्ध|विलोपित|DELETED)\b', raw_c, flags=re.IGNORECASE)[0].strip()
             c = clean_house_no(raw_c)
             if c and c not in ['-', '०', ':', '']:
                 house = c
@@ -253,12 +251,12 @@ def parse_full_card_tess(text: str) -> Dict[str, Any]:
             except:
                 pass
 
-        gm = re.search(r'(?:लिंग|सलग|ललग|जेंडर|Sex)\s*[:ः\-\s]*([^\s\n]+)', l)
+        gm = re.search(r'(?:लिंग|सलग|जेंडर|Sex)\s*[:ः\-\s]*([^\s\n]+)', l)
         if gm:
             g = gm.group(1)
             if any(k in g for k in ['स्त्री', 'महिला', 'सल', 'स्री']):
                 gender = 'स्त्री'
-            elif any(k in g for k in ['पुरुष', 'पुरूष', 'पचरष', 'प']):
+            elif any(k in g for k in ['पुरुष', 'पुरूष', 'प']):
                 gender = 'पुरुष'
 
     if rel_type == 'पति':
@@ -792,10 +790,8 @@ def clean_hindi_name(raw: str) -> str:
     if not raw:
         return ""
     s = str(raw).strip()
-    s = re.sub(r'^(?:मतदाता\s*(?:का|कर)?\s*)?(?:नाम|नरम)\s*[:ः\-\s]+', '', s)
-    s = re.sub(r'^(?:पिता|पति|माता|अन्य|पनत|नपतर|मरतर)\s*(?:का|कर)?\s*(?:नाम|नरम)\s*[:ः\-\s]+', '', s)
-    s = re.sub(r'\b(?:RJ/\d{2}/\d{3}/\d{6}|[A-Z]{2,3}\d{6,7})\b', '', s)
-    s = re.sub(r'\b(?:RJ|AZB|MTW|YTN)\b', '', s)
+    s = re.sub(r'^(?:मतदाता\s*(?:का)?\s*)?नाम\s*[:ः\-\s]+', '', s)
+    s = re.sub(r'^(?:पिता|पति|माता|अन्य|पनत|नपतर)\s*(?:का)?\s*नाम\s*[:ः\-\s]+', '', s)
     s = re.sub(r'[0-9\d«»|“”….,~`!@#$%^&*()_+=\[\]{}?\/\\]', '', s)
     s = re.sub(r'^[_\-\s;:,|]+', '', s)
     s = re.sub(r'[_\-\s;:,|]+$', '', s)
