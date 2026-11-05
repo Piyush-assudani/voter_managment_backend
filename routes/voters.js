@@ -644,10 +644,13 @@ router.get('/', verifyToken, requireModule('voters', 'community', 'workers', 'mi
 
       const orConditions = [];
 
-      // 1. Direct regex match on name fields
+      // 1. Direct regex match on name fields, relative name fields, and caste
       if (searchRegex) {
         orConditions.push({ nameHi: searchRegex });
         orConditions.push({ nameEn: searchRegex });
+        orConditions.push({ relativeNameHi: searchRegex });
+        orConditions.push({ relativeNameEn: searchRegex });
+        orConditions.push({ caste: searchRegex });
       }
 
       // If input is English/Latin, match via phonetic Devanagari regex
@@ -657,9 +660,15 @@ router.get('/', verifyToken, requireModule('voters', 'community', 'workers', 'mi
           const prefixPattern = new RegExp('(^|\\s)(' + latinDevRegex.source + ')', 'i');
           orConditions.push({ nameHi: prefixPattern });
           orConditions.push({ nameEn: prefixPattern });
+          orConditions.push({ relativeNameHi: prefixPattern });
+          orConditions.push({ relativeNameEn: prefixPattern });
+          orConditions.push({ caste: prefixPattern });
         } else {
           orConditions.push({ nameHi: latinDevRegex });
           orConditions.push({ nameEn: latinDevRegex });
+          orConditions.push({ relativeNameHi: latinDevRegex });
+          orConditions.push({ relativeNameEn: latinDevRegex });
+          orConditions.push({ caste: latinDevRegex });
         }
       }
 

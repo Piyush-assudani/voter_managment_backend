@@ -112,8 +112,70 @@ MASTER_DICT = {
     'पहीपद': 'प्रहलाद', 'सनातपदखवा': 'शान्तिदेवी', 'नवजखनसह': 'नवलसिंह',
     'रजतकमपा': 'रजत कुमार', 'कखहाखपन': 'कासम खान', 'हपाना': 'हसीना',
     'हारखपापम': 'हरखाराम', 'छटीपखपन': 'छोटेखान', 'चनदप': 'चन्दा',
-    'रघवार': 'रघुवीर', 'रघदवार मननालपी': 'रघुवीर मदनलालजी'
+    'रघवार': 'रघुवीर', 'रघदवार मननालपी': 'रघुवीर मदनलालजी',
+
+    # Jangid / Maulasar / Didwana SEC Font CMap Variants
+    'कमनलकशयर': 'कमलकिशोर', 'कमनीकशोर': 'कमलकिशोर', 'कमीदकशोर': 'कमलकिशोर',
+    'जकठ मल': 'जेठमल', 'जकठमल': 'जेठमल', 'जकठमी': 'जेठमल',
+    'जकठाराम': 'जेठाराम', 'जकठरररम': 'जेठाराम', 'जकठ': 'जेठ',
+    'जकठीदेवी': 'जेठीदेवी', 'जकठब सिंह': 'जेठू सिंह', 'जकठब': 'जेठू',
+    'नरमल कचमरर': 'निर्मल कुमार', 'नरमल': 'निर्मल',
+    'अपजच': 'अंजू', 'अपजब': 'अंजू', 'अपजु': 'अंजू', 'अपजनर': 'अंजना', 'अपजनल': 'अंजली', 'अपजील': 'अंजली',
+    'जहरपगलर': 'जांगिड़', 'जहापगीर': 'जांगिड़', 'जापगीड': 'जांगिड़',
+    'मपजबकपार': 'मंजूकंवर', 'मपजब देवी': 'मंजू देवी',
+    'पतरसलदरक': 'पतासी देवी', 'पतरसल': 'पतासी', 'रयनहत': 'रोहित', 'रोनहत': 'रोहित',
+    'पकमरररम': 'प्रेमराम', 'पकमा राम': 'प्रेमराम', 'पकमादेवी': 'प्रेमादेवी',
+    'पकमदरक': 'प्रेमदेवी', 'पकमरदरक': 'प्रेमदेवी', 'पकमलतर': 'प्रेमलता',
+    'पकमलसह': 'प्रेमसिंह', 'पकमारज': 'प्रेमराज', 'पकमचनद': 'प्रेमचन्द',
+    'पकमीता': 'प्रमिला', 'पकमी': 'प्रेमी', 'पकम': 'प्रेम',
+    'दकशयर': 'किशोर', 'दकशोराराम': 'किशोराराम', 'दकशोर': 'किशोर', 'दकशन': 'किशन',
+    'नपददकशोर': 'नंदकिशोर', 'ननददकशोर': 'नंदकिशोर', 'राजनपददनी': 'राजनंदिनी',
+    'ननदकता': 'नंदिता', 'शीदकशन': 'श्रीकिशन', 'शी गोपाल': 'श्री गोपाल',
+    'धमारराम': 'धर्माराम', 'अमाचपद': 'अमरचंद', 'अमा सिंह': 'अमर सिंह',
+    'सुखदेवदेवी': 'सुखदेव', 'सचखदरक': 'सुखदेव', 'नामी कुमार': 'निर्मल कुमार'
 }
+
+_glyph_data_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'glyph_corrections.json')
+with open(_glyph_data_path, 'r', encoding='utf-8') as _glyph_file:
+    GLYPH_EXACT = json.load(_glyph_file).get('exact_words', {})
+if not isinstance(GLYPH_EXACT, dict):
+    raise ValueError(f"Invalid exact_words map in {_glyph_data_path}")
+
+ACTIVE_MASTER_DICT = {**MASTER_DICT, **GLYPH_EXACT}
+MAULASAR_PARSE_VOTERS = None
+
+def detect_name_correction_profile(pdf_path, sample_pages=()):
+    if 'maulasar' in os.path.basename(pdf_path).lower():
+        return 'maulasar'
+
+    signature_pages = 0
+    for text in sample_pages:
+        epic_count = len(re.findall(
+            r'\b\d+\s+(?:RJ/\d{2}/\d{3}/\d{6}|[A-Z]{2,3}\d{6,7})\b',
+            text
+        ))
+        name_count = len(re.findall(r'नरम:', text))
+        relative_count = len(re.findall(r'(?:नपतर|पनत|मरतर)\s+कर\s+नरम:', text))
+        house_count = len(re.findall(r'मकरन\s+सपखजर:', text))
+        if epic_count >= 3 and name_count >= 6 and relative_count >= 3 and house_count >= 3:
+            signature_pages += 1
+
+    return 'maulasar' if signature_pages >= 2 else 'general'
+
+def configure_name_correction_profile(pdf_path, sample_pages=()):
+    global ACTIVE_MASTER_DICT, MAULASAR_PARSE_VOTERS
+
+    ACTIVE_MASTER_DICT = {**MASTER_DICT, **GLYPH_EXACT}
+    MAULASAR_PARSE_VOTERS = None
+    profile = detect_name_correction_profile(pdf_path, sample_pages)
+    if profile == 'maulasar':
+        # Reuse the field-verified parser and correction map for this PDF family.
+        from extract_maulasar_perfect import MASTER_DICT as MAULASAR_MASTER_DICT, parse_voters_from_page
+
+        ACTIVE_MASTER_DICT = {**MAULASAR_MASTER_DICT, **GLYPH_EXACT}
+        MAULASAR_PARSE_VOTERS = parse_voters_from_page
+        return 'maulasar'
+    return 'general'
 
 REL_TYPE_MAP = {
     'नपतर': 'पिता', 'पनत': 'पति', 'मरतर': 'माता',
@@ -135,8 +197,8 @@ def decode_token(tok):
     tok = tok.strip()
     if not tok:
         return ''
-    if tok in MASTER_DICT:
-        return MASTER_DICT[tok]
+    if tok in ACTIVE_MASTER_DICT:
+        return ACTIVE_MASTER_DICT[tok]
     
     # If token already contains standard Devanagari vowel signs or anusvara, preserve it
     if any(c in 'ािीुूेैोौँं' for c in tok):
@@ -195,7 +257,7 @@ def decode_token(tok):
         else:
             result.append(c)
     dec = ''.join(result)
-    return MASTER_DICT.get(dec, dec)
+    return ACTIVE_MASTER_DICT.get(dec, dec)
 
 def clean_and_decode(raw):
     if not raw:
@@ -213,6 +275,29 @@ def clean_and_decode(raw):
     s = re.sub(r'\b(?:RJ|AZB|MTW|YTN|WHH|CVS|SSB|BRV|ALR)\b', '', s)
     
     # Common phrase replacements
+    s = s.replace('जकठ मल जरपनगड़', 'जेठमल जांगिड़')
+    s = s.replace('जकठ मल जांगिड़', 'जेठमल जांगिड़')
+    s = s.replace('जकठ मल जहापगीर', 'जेठमल जांगिड़')
+    s = s.replace('जकठ मल', 'जेठमल')
+    s = s.replace('जकठमी जांगिड़', 'जेठमल जांगिड़')
+    s = s.replace('जकठमी', 'जेठमल')
+    s = s.replace('कमनलकशयर जरपनगड', 'कमलकिशोर जांगिड़')
+    s = s.replace('कमनीकशोर जरपनगड़', 'कमलकिशोर जांगिड़')
+    s = s.replace('कमनीकशोर जांगिड़', 'कमलकिशोर जांगिड़')
+    s = s.replace('नरमल कचमरर', 'निर्मल कुमार')
+    s = s.replace('नामी कुमार जांगिड़', 'निर्मल कुमार जांगिड़')
+    s = s.replace('नामी कुमार', 'निर्मल कुमार जांगिड़')
+    s = s.replace('अपजु जांगिड़', 'अंजू जांगिड़')
+    s = s.replace('अपजच जरपनगड़', 'अंजू जांगिड़')
+    s = s.replace('रयनहत कचमरर जरपनगड़', 'रोहित कुमार जांगिड़')
+    s = s.replace('सुखदेवदेवी', 'सुखदेव जांगिड़')
+    s = s.replace('नपददकशोर जहापगीर', 'नंदकिशोर जांगिड़')
+    s = s.replace('ननदकता जहापगीर जहापगीर', 'नंदिता जांगिड़')
+    s = s.replace('जहापगीर', 'जांगिड़')
+    s = s.replace('जहरपगलर', 'जांगिड़')
+    s = s.replace('जापगीड', 'जांगिड़')
+    s = s.replace('शी गोपाल जांगिड़', 'श्री गोपाल जांगिड़')
+    s = s.replace('शी गोपाल', 'श्री गोपाल')
     s = s.replace('दरक ल', 'दरकल')
     s = s.replace('सचख दरक', 'सुखदेव')
     s = s.replace('बरबच लरल', 'बाबूलाल')
@@ -456,6 +541,25 @@ def parse_cards_from_page(text, ward_no, booth_no):
             
     return voters
 
+def normalize_maulasar_voter(voter, booth_no):
+    name = voter.get('name', '')
+    relative_name = voter.get('relation_name', '')
+    return {
+        'serial': voter.get('serial'),
+        'epic': str(voter.get('epic', '')).strip().upper(),
+        'ward': str(voter.get('ward') or '1'),
+        'part': str(booth_no or '1'),
+        'name_hi': name,
+        'name_en': transliterate_hindi(name),
+        'relation': voter.get('relation_type', 'पिता'),
+        'relative_name_hi': relative_name,
+        'relative_name_en': transliterate_hindi(relative_name),
+        'house_no': voter.get('house_no') or '-',
+        'age': voter.get('age'),
+        'gender': voter.get('gender', 'पुरुष'),
+        'status': 'Active'
+    }
+
 # ==============================================================================
 # 5. MAIN WORKFLOW & EXCEL EXPORT
 # ==============================================================================
@@ -551,6 +655,13 @@ def extract_pdf(pdf_path, output_path, ward_no='', booth_no='', template_path=No
         
     all_voters = []
     with pdfplumber.open(pdf_path) as pdf:
+        profile_sample = [
+            page.extract_text() or ''
+            for page in pdf.pages[:8]
+        ]
+        correction_profile = configure_name_correction_profile(pdf_path, profile_sample)
+        print(f"Using {correction_profile} Hindi name-correction profile.")
+
         # Detect booth from cover if missing
         if not booth_no and len(pdf.pages) > 0:
             c_txt = pdf.pages[0].extract_text() or ""
@@ -568,7 +679,13 @@ def extract_pdf(pdf_path, output_path, ward_no='', booth_no='', template_path=No
             t = page.extract_text()
             if not t or not EPIC_RE.search(t):
                 continue
-            all_voters.extend(parse_cards_from_page(t, ward_no, booth_no))
+            if correction_profile == 'maulasar':
+                all_voters.extend(
+                    normalize_maulasar_voter(voter, booth_no)
+                    for voter in MAULASAR_PARSE_VOTERS(t, ward_no)
+                )
+            else:
+                all_voters.extend(parse_cards_from_page(t, ward_no, booth_no))
             
     # Deduplicate by EPIC and serial
     seen = {}
