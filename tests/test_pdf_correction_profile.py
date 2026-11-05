@@ -3,6 +3,7 @@
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -128,6 +129,100 @@ class PdfCorrectionProfileTests(unittest.TestCase):
         for record in (regional_record, generic_record):
             self.assertIsNone(record["age"])
             self.assertEqual(record["gender"], "")
+
+    def test_coordinate_crops_keep_two_adjacent_voters_separate(self):
+        anchors = [
+            {"text": "ABC1234567", "x0": 72, "x1": 125, "top": 100},
+            {"text": "ABC1234568", "x0": 245, "x1": 298, "top": 100},
+        ]
+        words = [
+            {"text": "1", "x0": 50, "x1": 56, "top": 100},
+            {"text": "2", "x0": 223, "x1": 229, "top": 100},
+            {"text": "नाम:", "x0": 92, "x1": 108, "top": 114},
+            {"text": "नाम:", "x0": 265, "x1": 281, "top": 114},
+        ]
+        words.extend(anchors)
+
+        class FakePage:
+            width = 595
+            height = 800
+
+            def extract_words(self):
+                return words
+
+            def crop(self, box):
+                card_text = (
+                    "1 ABC1234567\nनाम: पहला नाम\nपिता का नाम: पिता एक\n"
+                    "मकान संख्या: 12\nआयु: 45 लिंग: पुरुष"
+                    if box[0] < 200
+                    else "2 ABC1234568\nनाम: दूसरा नाम\nपिता का नाम: पिता दो\n"
+                    "मकान संख्या: 14\nआयु: 52 लिंग: स्त्री"
+                )
+                return SimpleNamespace(extract_text=lambda **_kwargs: card_text)
+
+        records = extractor.parse_voters_from_page_coordinates(
+            FakePage(),
+            "13",
+            "1",
+            "general",
+            [],
+            "unicode",
+        )
+
+        self.assertEqual([record["name_hi"] for record in records], ["पहला नाम", "दूसरा नाम"])
+        self.assertEqual(
+            [record["relative_name_hi"] for record in records],
+            ["एक", "दो"],
+        )
+
+    def test_krutidev_font_is_converted_before_field_parsing(self):
+        font_names = ["ABCDEF+KrutiDev010"]
+        raw_text = "1 ABC1234567\nuke: jke\nfirk: lqjsUnz\nvk;q: 45 fyax: iq#k"
+        converted = extractor.convert_legacy_pdf_text(raw_text, font_names)
+        record = extractor.parse_cards_from_page(
+            converted,
+            "13",
+            "1",
+            legacy_unicode=True,
+        )[0]
+
+        self.assertIn("ABC1234567", converted)
+        self.assertIn("नाम:", converted)
+        self.assertEqual(record["name_hi"], "राम")
+        self.assertEqual(record["relative_name_hi"], "सुरेन्द्र")
+        self.assertEqual(record["age"], 45)
+
+    def test_coordinate_crops_convert_legacy_font_fields(self):
+        words = [
+            {"text": "1", "x0": 50, "x1": 56, "top": 100},
+            {"text": "ABC1234567", "x0": 72, "x1": 125, "top": 100},
+            {"text": "uke:", "x0": 92, "x1": 110, "top": 114},
+        ]
+
+        class FakePage:
+            width = 595
+            height = 800
+
+            def extract_words(self):
+                return words
+
+            def crop(self, _box):
+                card_text = "1 ABC1234567\nuke: jke\nfirk: lqjsUnz\nvk;q: 45 fyax: iq#k"
+                return SimpleNamespace(extract_text=lambda **_kwargs: card_text)
+
+        records = extractor.parse_voters_from_page_coordinates(
+            FakePage(),
+            "13",
+            "1",
+            "general",
+            ["ABCDEF+KrutiDev010"],
+            "krutidev",
+        )
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["name_hi"], "राम")
+        self.assertEqual(records[0]["relative_name_hi"], "सुरेन्द्र")
+        self.assertEqual(records[0]["age"], 45)
 
 
 if __name__ == "__main__":

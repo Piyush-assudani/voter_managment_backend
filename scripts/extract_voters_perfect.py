@@ -11,10 +11,17 @@ import os
 import re
 import json
 import argparse
+import statistics
 from collections import defaultdict
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
+
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
+from python_engine.krutidev_converter import auto_convert_text, detect_encoding_type
 
 try:
     import pdfplumber
@@ -189,6 +196,7 @@ GENDER_MAP = {
 }
 
 EPIC_RE = re.compile(r'(\d+)\s+([A-Z]{2,4}[0-9]{6,8}|[A-Z]{2,3}\s*[\/\-]\s*\d{1,3}\s*[\/\-]\s*\d{1,3}\s*[\/\-]\s*\d{3,7})')
+EPIC_ID_RE = re.compile(r'(?:[A-Z]{2,4}\d{6,8}|[A-Z]{2,3}\s*[\/\-]\s*\d{1,3}\s*[\/\-]\s*\d{1,3}\s*[\/\-]\s*\d{3,7})', re.I)
 
 # ==============================================================================
 # 2. TOKEN & CMap POSITION-AWARE DECODER
@@ -318,6 +326,58 @@ def clean_and_decode(raw):
     res = ' '.join(decoded)
     return re.sub(r'\s+', ' ', res).strip()
 
+def clean_unicode_name(raw):
+    if not raw:
+        return ''
+    text = str(raw).strip()
+    text = re.sub(r'-?\d{1,3}-[^\s]+', '', text)
+    text = re.sub(
+        r'^(?:मतदाता\s*(?:का|के)?\s*)?(?:नाम|नरम|नपम)\s*[:ः\-]?\s*',
+        '',
+        text,
+    )
+    text = re.sub(
+        r'^(?:पिता|पति|माता|अन्य)\s*(?:का|के|कर)?\s*(?:नाम)?\s*[:ः\-]?\s*',
+        '',
+        text,
+    )
+    text = re.sub(r'\s*(?:Photo\s+is|Available)\s*', ' ', text, flags=re.I)
+    text = re.sub(
+        r'\b(?:RJ/\d{2}/\d{3}/\d{6}|[A-Z]{2,4}\d{6,8})\b',
+        '',
+        text,
+        flags=re.I,
+    )
+    return re.sub(r'\s+', ' ', text).strip()
+
+def normalize_legacy_field_labels(text):
+    return re.sub(
+        r'(नाम|आयु|लिंग|मकान|पिता|पति|माता|अन्य)रू(?=\s|:)',
+        r'\1:',
+        text,
+    )
+
+def convert_legacy_pdf_text(text, font_names):
+    protected_epics = []
+    marker_start, marker_end = (
+        ('\x01', '\x02')
+        if detect_encoding_type(text, font_names) == 'pua'
+        else ('\ue000', '\ue001')
+    )
+
+    def protect_epic(match):
+        protected_epics.append(match.group(0))
+        return f'{marker_start}{len(protected_epics) - 1}{marker_end}'
+
+    protected_text = EPIC_ID_RE.sub(protect_epic, text)
+    converted = auto_convert_text(protected_text, font_names)
+    converted = re.sub(
+        re.escape(marker_start) + r'(\d+)' + re.escape(marker_end),
+        lambda match: protected_epics[int(match.group(1))],
+        converted,
+    )
+    return normalize_legacy_field_labels(converted)
+
 def strip_voter_from_relative(voter_name, rel_name):
     if not voter_name or not rel_name:
         return rel_name or ''
@@ -415,7 +475,7 @@ def transliterate_hindi(text):
 # ==============================================================================
 # 4. CARD PARSER (Universal Dual-Mode: SEC Encoded & Standard Hindi)
 # ==============================================================================
-def parse_cards_from_page(text, ward_no, booth_no):
+def parse_cards_from_page(text, ward_no, booth_no, legacy_unicode=False):
     lines = text.split('\n')
     voters = []
     epic_groups = []
@@ -457,23 +517,24 @@ def parse_cards_from_page(text, ward_no, booth_no):
                 continue
                 
             # 1. Names Line (matches either 'नरम:' or 'नाम:' or 'नपम:')
-            if re.search(r'(?:नरम|नाम|नपम):', clean) and not re.search(r'(?:नपतर|पनत|मरतर|पिता|पति|माता|अन्य)', clean):
-                parts = re.split(r'(?:नरम|नाम|नपम):\s*', clean)
+            if re.search(r'(?:नरम|नाम|नपम)र?\s*[:ः]', clean) and not re.search(r'(?:नपतर|पनत|मरतर|पिता|पति|माता|अन्य)', clean):
+                parts = re.split(r'(?:नरम|नाम|नपम)र?\s*[:ः]\s*', clean)
                 for part in parts[1:]:
                     part_clean = re.sub(r'\s*Photo\s*is\s*$', '', part, flags=re.I).strip()
                     part_clean = re.sub(r'\s*Available\s*$', '', part_clean, flags=re.I).strip()
                     if part_clean:
-                        names.append(clean_and_decode(part_clean))
+                        name = clean_unicode_name(part_clean) if legacy_unicode else clean_and_decode(part_clean)
+                        names.append(name)
                 continue
             
             # 2. Relations Line (matches SEC 'नपतर कर नरम:' or Standard 'पिता का नाम:')
-            if re.search(r'(?:नपतर|पनत|मरतर|पिता|पति|माता|अन्य)\s+(?:कर|का|के)?\s*(?:नरम|नाम|नपम)?:', clean):
-                rel_re = re.compile(r'(नपतर|पनत|मरतर|पिता|पति|माता|अन्य)\s+(?:कर|का|के)?\s*(?:नरम|नाम|नपम)?:\s*')
+            if re.search(r'(?:नपतर|पनत|मरतर|पिता|पति|माता|अन्य)\s*(?:कर|का|के)?\s*(?:नरम|नाम|नपम)?\s*[:ः]', clean):
+                rel_re = re.compile(r'(नपतर|पनत|मरतर|पिता|पति|माता|अन्य)\s*(?:कर|का|के)?\s*(?:नरम|नाम|नपम)?\s*[:ः]\s*')
                 parts = rel_re.split(clean)
                 i = 1
                 while i < len(parts) - 1:
                     rtype = REL_TYPE_MAP.get(parts[i], 'पिता')
-                    rname = clean_and_decode(parts[i + 1])
+                    rname = clean_unicode_name(parts[i + 1]) if legacy_unicode else clean_and_decode(parts[i + 1])
                     relations.append((rtype, rname))
                     i += 2
                 continue
@@ -559,6 +620,127 @@ def normalize_maulasar_voter(voter, booth_no):
         'gender': voter.get('gender', 'पुरुष'),
         'status': 'Active'
     }
+
+def extract_font_names_from_page(page):
+    return sorted({
+        char.get('fontname', '')
+        for char in page.chars
+        if char.get('fontname')
+    })
+
+def parse_voters_from_page_coordinates(page, ward_no, booth_no, correction_profile, font_names, encoding):
+    words = page.extract_words()
+    anchors = [
+        word for word in words
+        if EPIC_ID_RE.search(word.get('text', '').strip())
+    ]
+    if not anchors:
+        return []
+
+    column_positions = []
+    for anchor in sorted(anchors, key=lambda word: word['x0']):
+        if not column_positions or anchor['x0'] - column_positions[-1][-1] > 24:
+            column_positions.append([anchor['x0']])
+        else:
+            column_positions[-1].append(anchor['x0'])
+    column_centers = [statistics.median(cluster) for cluster in column_positions]
+    pitch = statistics.median(
+        [right - left for left, right in zip(column_centers, column_centers[1:])]
+    ) if len(column_centers) > 1 else page.width / 3
+
+    legacy_font = encoding in ('krutidev', 'pua', 'mixed')
+    output = []
+    seen_anchors = set()
+    for anchor in anchors:
+        anchor_epic = EPIC_ID_RE.search(anchor['text']).group(0).replace(' ', '').upper()
+        anchor_key = (anchor_epic, round(anchor['top']), round(anchor['x0']))
+        if anchor_key in seen_anchors:
+            continue
+        seen_anchors.add(anchor_key)
+
+        nearby_name_labels = [
+            word for word in words
+            if anchor['top'] + 6 <= word['top'] <= anchor['top'] + 30
+            and (
+                re.fullmatch(r'(?:नरम|नाम|नपम)[:ः]?', word['text'], re.I)
+                or (legacy_font and re.fullmatch(r'(?:uke|nam)[:.]?', word['text'], re.I))
+            )
+        ]
+        label = min(
+            nearby_name_labels,
+            key=lambda word: abs(word['x0'] - anchor['x0']),
+            default=None,
+        )
+        serial_words = [
+            word for word in words
+            if word['text'].isdigit()
+            and anchor['top'] - 2 <= word['top'] <= anchor['top'] + 2
+            and 0 <= anchor['x0'] - word['x1'] <= 80
+        ]
+        serial = min(serial_words, key=lambda word: anchor['x0'] - word['x1'], default=None)
+        left_edges = [anchor['x0']]
+        if label:
+            left_edges.append(label['x0'])
+        if serial:
+            left_edges.append(serial['x0'])
+        x0 = max(0, min(left_edges) - 5)
+        x1 = min(page.width, x0 + pitch)
+        y0 = max(0, anchor['top'] - 3)
+        y1 = min(page.height, anchor['top'] + 68)
+
+        card_text = page.crop((x0, y0, x1, y1)).extract_text(
+            x_tolerance=2,
+            y_tolerance=3,
+        ) or ''
+        if legacy_font:
+            card_text = convert_legacy_pdf_text(card_text, font_names)
+
+        if correction_profile == 'maulasar' and not legacy_font:
+            candidates = [
+                normalize_maulasar_voter(record, booth_no)
+                for record in MAULASAR_PARSE_VOTERS(card_text, ward_no)
+            ]
+        else:
+            candidates = parse_cards_from_page(
+                card_text,
+                ward_no,
+                booth_no,
+                legacy_unicode=legacy_font,
+            )
+        output.extend(
+            voter for voter in candidates
+            if voter['epic'].replace(' ', '').upper() == anchor_epic
+        )
+    return output
+
+def supplement_missing_voter_fields(voters, spatial_voters):
+    by_epic = {voter['epic'].replace(' ', '').upper(): voter for voter in voters}
+    for spatial in spatial_voters:
+        voter = by_epic.get(spatial['epic'].replace(' ', '').upper())
+        if voter is None:
+            voters.append(spatial)
+            by_epic[spatial['epic'].replace(' ', '').upper()] = spatial
+            continue
+
+        name_key = 'name_hi'
+        relative_key = 'relative_name_hi'
+        if not voter.get(name_key) and spatial.get(name_key):
+            voter[name_key] = spatial[name_key]
+            voter['name_en'] = spatial.get('name_en', voter.get('name_en', ''))
+        if not voter.get(relative_key) and spatial.get(relative_key):
+            voter[relative_key] = spatial[relative_key]
+            voter['relative_name_en'] = spatial.get(
+                'relative_name_en',
+                voter.get('relative_name_en', ''),
+            )
+            voter['relation'] = spatial.get('relation', voter.get('relation', 'पिता'))
+        if voter.get('house_no') in ('', '-', '0', '00') and spatial.get('house_no') not in ('', '-', '0', '00'):
+            voter['house_no'] = spatial['house_no']
+        if voter.get('age') is None and spatial.get('age') is not None:
+            voter['age'] = spatial['age']
+        if not voter.get('gender') and spatial.get('gender'):
+            voter['gender'] = spatial['gender']
+    return voters
 
 # ==============================================================================
 # 5. MAIN WORKFLOW & EXCEL EXPORT
@@ -655,10 +837,16 @@ def extract_pdf(pdf_path, output_path, ward_no='', booth_no='', template_path=No
         
     all_voters = []
     with pdfplumber.open(pdf_path) as pdf:
-        profile_sample = [
-            page.extract_text() or ''
-            for page in pdf.pages[:8]
-        ]
+        profile_sample = []
+        for page in pdf.pages[:8]:
+            raw_text = page.extract_text() or ''
+            font_names = extract_font_names_from_page(page)
+            encoding = detect_encoding_type(raw_text, font_names)
+            profile_sample.append(
+                convert_legacy_pdf_text(raw_text, font_names)
+                if encoding in ('krutidev', 'pua', 'mixed')
+                else raw_text
+            )
         correction_profile = configure_name_correction_profile(pdf_path, profile_sample)
         print(f"Using {correction_profile} Hindi name-correction profile.")
 
@@ -676,16 +864,61 @@ def extract_pdf(pdf_path, output_path, ward_no='', booth_no='', template_path=No
             booth_no = "1"
 
         for page in pdf.pages:
-            t = page.extract_text()
+            raw_text = page.extract_text() or ''
+            font_names = extract_font_names_from_page(page)
+            encoding = detect_encoding_type(raw_text, font_names)
+            is_legacy_font = encoding in ('krutidev', 'pua', 'mixed')
+            t = convert_legacy_pdf_text(raw_text, font_names) if is_legacy_font else raw_text
             if not t or not EPIC_RE.search(t):
                 continue
-            if correction_profile == 'maulasar':
-                all_voters.extend(
+            if is_legacy_font:
+                spatial_voters = parse_voters_from_page_coordinates(
+                    page,
+                    ward_no,
+                    booth_no,
+                    correction_profile,
+                    font_names,
+                    encoding,
+                )
+                text_voters = parse_cards_from_page(
+                    t,
+                    ward_no,
+                    booth_no,
+                    legacy_unicode=True,
+                )
+                page_voters = (
+                    supplement_missing_voter_fields(spatial_voters, text_voters)
+                    if spatial_voters
+                    else text_voters
+                )
+            elif correction_profile == 'maulasar':
+                page_voters = [
                     normalize_maulasar_voter(voter, booth_no)
                     for voter in MAULASAR_PARSE_VOTERS(t, ward_no)
-                )
+                ]
             else:
-                all_voters.extend(parse_cards_from_page(t, ward_no, booth_no))
+                page_voters = parse_cards_from_page(t, ward_no, booth_no)
+
+            if not is_legacy_font and (
+                not page_voters
+                or (
+                    correction_profile != 'maulasar'
+                    and any(
+                        not voter.get('name_hi') or not voter.get('relative_name_hi')
+                        for voter in page_voters
+                    )
+                )
+            ):
+                spatial_voters = parse_voters_from_page_coordinates(
+                    page,
+                    ward_no,
+                    booth_no,
+                    correction_profile,
+                    font_names,
+                    encoding,
+                )
+                page_voters = supplement_missing_voter_fields(page_voters, spatial_voters)
+            all_voters.extend(page_voters)
             
     # Deduplicate by EPIC and serial
     seen = {}
