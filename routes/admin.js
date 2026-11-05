@@ -1087,7 +1087,7 @@ router.post(
   '/upload-voters',
   verifyToken,
   isAdmin,
-  upload.fields([{ name: 'file', maxCount: 1 }, { name: 'files', maxCount: 10 }]),
+  upload.fields([{ name: 'file', maxCount: 50 }, { name: 'files', maxCount: 50 }]),
   async (req, res) => {
   const uploadedFiles = [
     ...(req.files?.file || []),

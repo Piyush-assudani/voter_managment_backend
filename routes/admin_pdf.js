@@ -119,9 +119,39 @@ router.post('/upload', verifyToken, isAdmin, (req, res, next) => {
     const rawFiles = req.files && req.files.length ? req.files : (req.file ? [req.file] : []);
     const seenFiles = new Set();
     const pdfFiles = [];
+    const unzipper = require('unzipper');
+
     for (const f of rawFiles) {
       const isPdf = f.originalname.toLowerCase().endsWith('.pdf') || f.mimetype === 'application/pdf';
-      if (isPdf) {
+      const isZip = f.originalname.toLowerCase().endsWith('.zip') || f.mimetype === 'application/zip' || f.mimetype === 'application/x-zip-compressed';
+
+      if (isZip) {
+        try {
+          const directory = await unzipper.Open.file(f.path);
+          for (const entry of directory.files) {
+            const entryName = entry.path;
+            const isEntryPdf = entryName.toLowerCase().endsWith('.pdf') && !entryName.startsWith('__MACOSX') && !entryName.includes('/.');
+            if (isEntryPdf) {
+              const baseName = path.basename(entryName);
+              const extractedPath = path.join(uploadDir, `${Date.now()}-${baseName}`);
+              const buffer = await entry.buffer();
+              fs.writeFileSync(extractedPath, buffer);
+              const key = `${baseName.toLowerCase().trim()}_${buffer.length}`;
+              if (!seenFiles.has(key)) {
+                seenFiles.add(key);
+                pdfFiles.push({
+                  originalname: baseName,
+                  path: extractedPath,
+                  size: buffer.length
+                });
+              }
+            }
+          }
+          try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch {}
+        } catch (zipErr) {
+          console.error('[AdminPdf] Error extracting zip file:', zipErr.message);
+        }
+      } else if (isPdf) {
         const key = `${f.originalname.toLowerCase().trim()}_${f.size}`;
         if (!seenFiles.has(key)) {
           seenFiles.add(key);
@@ -131,8 +161,12 @@ router.post('/upload', verifyToken, isAdmin, (req, res, next) => {
         }
       }
     }
+
+    // Sort files in natural ascending numeric order (Ward 1, Ward 2, ... Ward 17)
+    pdfFiles.sort((a, b) => a.originalname.localeCompare(b.originalname, undefined, { numeric: true }));
+
     if (!pdfFiles.length) {
-      return res.status(400).json({ error: 'कृपया कम से कम एक वैध PDF फाइल (.pdf) चुनें।' });
+      return res.status(400).json({ error: 'कृपया कम से कम एक वैध PDF (.pdf) या ZIP (.zip) फाइल चुनें जिसमें PDF मतदाता सूचियां हों।' });
     }
     
     const organizationId = req.body.organizationId || "org_default";

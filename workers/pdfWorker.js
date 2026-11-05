@@ -305,6 +305,38 @@ const ExcelJS = require('exceljs');
           }
         });
 
+        const isDevanagariSheet = (worksheet.name && worksheet.name.includes('मतदाता')) ||
+          (worksheet.getRow(1).getCell(1).value && String(worksheet.getRow(1).getCell(1).value).includes('क्रमांक'));
+        
+        const fallbackCol = isDevanagariSheet ? {
+          serialNo: 1,
+          epic: 2,
+          nameHi: 3,
+          relativeNameHi: 4,
+          relationType: 5,
+          houseNo: 6,
+          age: 7,
+          gender: 8,
+          villageName: 9,
+          wardNo: 10,
+          partNo: 11,
+          status: 12
+        } : {
+          epic: 1,
+          wardNo: 2,
+          partNo: 3,
+          serialNo: 4,
+          nameEn: 5,
+          nameHi: 6,
+          age: 7,
+          gender: 8,
+          relationType: 9,
+          relativeNameEn: 10,
+          relativeNameHi: 11,
+          houseNo: 12,
+          villageName: 17
+        };
+
         const cellVal = (row, key, fallbackIdx) => {
           const idx = colMap[key] || fallbackIdx;
           if (!idx) return '';
@@ -316,48 +348,58 @@ const ExcelJS = require('exceljs');
           }
           return '';
         };
+
+        function cleanLabelAndEpic(str) {
+          if (!str) return '';
+          let s = String(str).trim();
+          s = s.replace(/^(?:मतदाता\s*(?:का|कर|कप)?\s*)?(?:नाम|नरम|नपम)\s*[:ः\-]\s*/gi, '');
+          s = s.replace(/^(?:पिता|पति|माता|अन्य|पनत|नपतर|मरतर|नपतपकपनपम|पनतकपनपम|नपतपकप|पनतकप)\s*(?:का|कर|कप)?\s*(?:नाम|नरम|नपम)?\s*[:ः\-]\s*/gi, '');
+          s = s.replace(/^(?:नपम|नरम)\s*[:ः\-]?\s+/gi, '');
+          s = s.replace(/^नाम\s*[:ः\-]\s*/gi, '');
+          s = s.replace(/^(?:नपतपकपनपम|पनतकपनपम|नपतपकप|पनतकप|नपतर|पनत|मरतर)\s*[:ः\-]?\s*/gi, '');
+          s = s.replace(/\b(?:RJ\/\d{2}\/\d{3}\/\d{6}|[A-Z]{2,3}\d{6,7})\b/gi, '');
+          s = s.replace(/\b[A-Z]{2,4}\b/g, '');
+          return s.replace(/\s+/g, ' ').trim();
+        }
+
+        function isGarbageName(name) {
+          if (!name || name.trim().length < 2) return true;
+          const n = name.trim();
+          if (/^(मतदाता|निर्वाचक|क्रेकक|ई-मेल|email|photo|available|अनज|नपम|नरम)$/i.test(n)) return true;
+          if (/(?:लिंग|लीग|आयु|आखद|मकान|वार्ड|बूथ|विधानसभा|पदाष)/i.test(n)) return true;
+          return false;
+        }
         
         worksheet.eachRow((row, rowNumber) => {
           if (rowNumber === 1) return; // header
-          const rawSerial = cellVal(row, 'serialNo', 4);
+          const rawSerial = cellVal(row, 'serialNo', fallbackCol.serialNo);
           const serialVal = rawSerial ? parseInt(rawSerial, 10) : null;
-          const epic = cellVal(row, 'epic', 1);
-          function cleanLabelAndEpic(str) {
-            if (!str) return '';
-            let s = String(str).trim();
-            s = s.replace(/^(?:मतदाता\s*(?:का|कर|कप)?\s*)?(?:नाम|नरम|नपम)\s*[:ः\-\s]*/gi, '');
-            s = s.replace(/^(?:पिता|पति|माता|अन्य|पनत|नपतर|मरतर|नपतपकपनपम|पनतकपनपम|नपतपकप|पनतकप)\s*(?:का|कर|कप)?\s*(?:नाम|नरम|नपम)?\s*[:ः\-\s]*/gi, '');
-            s = s.replace(/^(?:नपम|नरम|नाम)\s*[:ः\-\s]*/gi, '');
-            s = s.replace(/^(?:नपतपकपनपम|पनतकपनपम|नपतपकप|पनतकप|नपतर|पनत|मरतर)\s*[:ः\-\s]*/gi, '');
-            s = s.replace(/\b(?:RJ\/\d{2}\/\d{3}\/\d{6}|[A-Z]{2,3}\d{6,7})\b/gi, '');
-            s = s.replace(/\b[A-Z]{2,4}\b/g, '');
-            return s.replace(/\s+/g, ' ').trim();
-          }
-
-          const rawName = cellVal(row, 'nameHi', 6);
+          const epic = cellVal(row, 'epic', fallbackCol.epic);
+          const rawName = cellVal(row, 'nameHi', fallbackCol.nameHi);
           const cleanName = rawName ? fixCorruptedHindi(cleanLabelAndEpic(rawName)) : '';
 
-          const rowWard = cellVal(row, 'wardNo', 2) || wardNo || defaultWardNo || '1';
-          const rowBooth = cellVal(row, 'partNo', 3) || boothNo || defaultPartNo || '1';
+          const rowWard = cellVal(row, 'wardNo', fallbackCol.wardNo) || wardNo || defaultWardNo || '1';
+          const rowBooth = cellVal(row, 'partNo', fallbackCol.partNo) || boothNo || defaultPartNo || '1';
           const rowPanchayat = cellVal(row, 'panchayat') || panchayat || '';
 
           // STRICT VALIDATION: Check if authentic voter name OR if marked deleted/unreadable
-          if (cleanName && cleanName !== 'मतदाता' && cleanName.length >= 2) {
-            const rawNameEn = cellVal(row, 'nameEn', 5);
-            const rawRel = cellVal(row, 'relativeNameHi', 11);
+          if (cleanName && !isGarbageName(cleanName)) {
+            const rawNameEn = cellVal(row, 'nameEn', fallbackCol.nameEn);
+            const rawRel = cellVal(row, 'relativeNameHi', fallbackCol.relativeNameHi);
             let cleanRel = rawRel ? fixCorruptedHindi(cleanLabelAndEpic(rawRel)) : '';
+            if (isGarbageName(cleanRel)) cleanRel = '';
             cleanRel = stripNameFromRelative(cleanName, cleanRel);
-            const rawRelEn = cellVal(row, 'relativeNameEn', 10);
-            const cleanH = cleanHouseNo(cellVal(row, 'houseNo', 12));
+            const rawRelEn = cellVal(row, 'relativeNameEn', fallbackCol.relativeNameEn);
+            const cleanH = cleanHouseNo(cellVal(row, 'houseNo', fallbackCol.houseNo));
             const finalHouse = (cleanH && cleanH !== '0' && cleanH !== '00') ? cleanH : '-';
             const finalNameEn = (rawNameEn && /^[a-zA-Z\s\.\-]+$/.test(String(rawNameEn).trim())) ? String(rawNameEn).trim() : cleanName;
             const finalRelEn = (rawRelEn && /^[a-zA-Z\s\.\-]+$/.test(String(rawRelEn).trim())) ? String(rawRelEn).trim() : (cleanRel.length >= 2 ? cleanRel : (rawRel || ''));
             
-            const rawAge = cellVal(row, 'age', 7);
+            const rawAge = cellVal(row, 'age', fallbackCol.age);
             let ageVal = rawAge ? parseInt(rawAge, 10) : null;
             if (!ageVal || ageVal < 18 || ageVal > 125) ageVal = null;
             
-            let relType = cellVal(row, 'relationType', 9);
+            let relType = cellVal(row, 'relationType', fallbackCol.relationType);
             if (!['पिता', 'पति', 'माता', 'अन्य'].includes(relType)) {
               if (rawRel && /पति|पनत|पनतकपनपम|पनतकप/.test(rawRel)) {
                 relType = 'पति';
@@ -439,8 +481,8 @@ const ExcelJS = require('exceljs');
               epic: (epic && epic !== '-' && epic.trim() !== '') ? epic.trim() : `UNREADABLE_W${rowWard}_P${rowBooth}_S${serialVal || (finalVoterList.length + 1)}`,
               nameHi: cleanName || 'अपठनीय मतदाता (संशोधन आवश्यक)',
               nameEn: 'Unreadable Voter',
-              relativeNameHi: cellVal(row, 'relativeNameHi', 11) || '',
-              relativeNameEn: cellVal(row, 'relativeNameEn', 10) || '',
+              relativeNameHi: cellVal(row, 'relativeNameHi', fallbackCol.relativeNameHi) || '',
+              relativeNameEn: cellVal(row, 'relativeNameEn', fallbackCol.relativeNameEn) || '',
               relationType: 'पिता',
               houseNo: finalHouse,
               age: null,

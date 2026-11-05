@@ -155,19 +155,15 @@ def detect_name_correction_profile(pdf_path, sample_pages=()):
     if 'maulasar' in os.path.basename(pdf_path).lower():
         return 'maulasar'
 
-    signature_pages = 0
     for text in sample_pages:
-        epic_count = len(re.findall(
-            r'\b\d+\s+(?:RJ/\d{2}/\d{3}/\d{6}|[A-Z]{2,3}\d{6,7})\b',
+        sec_signals = len(re.findall(
+            r'(?:नरम|नपम|नपतर|पनत|मरतर|नपतपकपनपम|पनतकपनपम|मकरन|आजच|ललग|पचरष|सल|दखवा|कमपा|लीग|आखद|पदाष)',
             text
         ))
-        name_count = len(re.findall(r'नरम:', text))
-        relative_count = len(re.findall(r'(?:नपतर|पनत|मरतर)\s+कर\s+नरम:', text))
-        house_count = len(re.findall(r'मकरन\s+सपखजर:', text))
-        if epic_count >= 3 and name_count >= 6 and relative_count >= 3 and house_count >= 3:
-            signature_pages += 1
+        if sec_signals >= 4:
+            return 'maulasar'
 
-    return 'maulasar' if signature_pages >= 2 else 'general'
+    return 'general'
 
 def configure_name_correction_profile(pdf_path, sample_pages=()):
     global ACTIVE_MASTER_DICT, MAULASAR_PARSE_VOTERS
@@ -273,9 +269,14 @@ def clean_and_decode(raw):
     s = str(raw).strip()
     # Strip administrative headers
     s = re.sub(r'-?\d{1,3}-[^\s]+', '', s)
+    # Reject leaked gender/age/label rows
+    if re.search(r'(?:लिंग|लीग|आयु|आखद|पदाष|मकान\s*संख्या)', s, flags=re.I):
+        return ''
     # Strip label bleed prefixes
-    s = re.sub(r'^(?:मतदाता\s*(?:का|कर|कप)?\s*)?(?:नाम|नरम|नपम)\s*[:ः\-\s]+', '', s, flags=re.I)
-    s = re.sub(r'^(?:पिता|पति|माता|अन्य|पनत|नपतर|मरतर|नपतपकपनपम|पनतकपनपम)\s*(?:का|कर|कप)?\s*(?:नाम|नरम|नपम)?\s*[:ः\-\s]+', '', s, flags=re.I)
+    s = re.sub(r'^(?:मतदाता\s*(?:का|कर|कप)?\s*)?(?:नाम|नरम|नपम)\s*[:ः\-]?\s*', '', s, flags=re.I)
+    s = re.sub(r'^(?:पिता|पति|माता|अन्य|पनत|नपतर|मरतर|नपतपकपनपम|पनतकपनपम|नपतपकप|पनतकप)\s*(?:का|कर|कप)?\s*(?:नाम|नरम|नपम)?\s*[:ः\-]?\s*', '', s, flags=re.I)
+    s = re.sub(r'^(?:नपम|नरम)(?=[क-ह])', '', s)
+    s = re.sub(r'^(?:नपतपकपनपम|पनतकपनपम|नपतपकप|पनतकप|नपतर|पनत|मरतर)(?=[क-ह])', '', s)
     s = re.sub(r'\s*Photo\s+is\s*', ' ', s, flags=re.I)
     s = re.sub(r'\s*Available\s*', ' ', s, flags=re.I)
     # Strip trailing/embedded EPIC badges
@@ -331,6 +332,8 @@ def clean_unicode_name(raw):
         return ''
     text = str(raw).strip()
     text = re.sub(r'-?\d{1,3}-[^\s]+', '', text)
+    if re.search(r'(?:लिंग|लीग|आयु|आखद|पदाष|मकान\s*संख्या)', text, flags=re.I):
+        return ''
     text = re.sub(
         r'^(?:मतदाता\s*(?:का|के)?\s*)?(?:नाम|नरम|नपम)\s*[:ः\-]?\s*',
         '',
@@ -341,6 +344,7 @@ def clean_unicode_name(raw):
         '',
         text,
     )
+    text = re.sub(r'^(?:नपम|नरम)(?=[क-ह])', '', text)
     text = re.sub(r'\s*(?:Photo\s+is|Available)\s*', ' ', text, flags=re.I)
     text = re.sub(
         r'\b(?:RJ/\d{2}/\d{3}/\d{6}|[A-Z]{2,4}\d{6,8})\b',
@@ -348,6 +352,7 @@ def clean_unicode_name(raw):
         text,
         flags=re.I,
     )
+    text = re.sub(r'\b(?:RJ|AZB|MTW|YTN|WHH|CVS|SSB|BRV|ALR)\b', '', text)
     return re.sub(r'\s+', ' ', text).strip()
 
 def normalize_legacy_field_labels(text):
