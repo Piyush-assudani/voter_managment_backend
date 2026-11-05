@@ -322,8 +322,20 @@ const ExcelJS = require('exceljs');
           const rawSerial = cellVal(row, 'serialNo', 4);
           const serialVal = rawSerial ? parseInt(rawSerial, 10) : null;
           const epic = cellVal(row, 'epic', 1);
+          function cleanLabelAndEpic(str) {
+            if (!str) return '';
+            let s = String(str).trim();
+            s = s.replace(/^(?:मतदाता\s*(?:का|कर|कप)?\s*)?(?:नाम|नरम|नपम)\s*[:ः\-\s]*/gi, '');
+            s = s.replace(/^(?:पिता|पति|माता|अन्य|पनत|नपतर|मरतर|नपतपकपनपम|पनतकपनपम|नपतपकप|पनतकप)\s*(?:का|कर|कप)?\s*(?:नाम|नरम|नपम)?\s*[:ः\-\s]*/gi, '');
+            s = s.replace(/^(?:नपम|नरम|नाम)\s*[:ः\-\s]*/gi, '');
+            s = s.replace(/^(?:नपतपकपनपम|पनतकपनपम|नपतपकप|पनतकप|नपतर|पनत|मरतर)\s*[:ः\-\s]*/gi, '');
+            s = s.replace(/\b(?:RJ\/\d{2}\/\d{3}\/\d{6}|[A-Z]{2,3}\d{6,7})\b/gi, '');
+            s = s.replace(/\b[A-Z]{2,4}\b/g, '');
+            return s.replace(/\s+/g, ' ').trim();
+          }
+
           const rawName = cellVal(row, 'nameHi', 6);
-          const cleanName = rawName ? fixCorruptedHindi(String(rawName).trim()) : '';
+          const cleanName = rawName ? fixCorruptedHindi(cleanLabelAndEpic(rawName)) : '';
 
           const rowWard = cellVal(row, 'wardNo', 2) || wardNo || defaultWardNo || '1';
           const rowBooth = cellVal(row, 'partNo', 3) || boothNo || defaultPartNo || '1';
@@ -333,13 +345,13 @@ const ExcelJS = require('exceljs');
           if (cleanName && cleanName !== 'मतदाता' && cleanName.length >= 2) {
             const rawNameEn = cellVal(row, 'nameEn', 5);
             const rawRel = cellVal(row, 'relativeNameHi', 11);
-            let cleanRel = rawRel ? fixCorruptedHindi(String(rawRel).trim()) : '';
+            let cleanRel = rawRel ? fixCorruptedHindi(cleanLabelAndEpic(rawRel)) : '';
             cleanRel = stripNameFromRelative(cleanName, cleanRel);
             const rawRelEn = cellVal(row, 'relativeNameEn', 10);
             const cleanH = cleanHouseNo(cellVal(row, 'houseNo', 12));
             const finalHouse = (cleanH && cleanH !== '0' && cleanH !== '00') ? cleanH : '-';
-            const finalNameEn = (rawNameEn && /[a-zA-Z]/.test(rawNameEn)) ? String(rawNameEn).trim() : cleanName;
-            const finalRelEn = (rawRelEn && /[a-zA-Z]/.test(rawRelEn)) ? String(rawRelEn).trim() : (cleanRel.length >= 2 ? cleanRel : (rawRel || ''));
+            const finalNameEn = (rawNameEn && /^[a-zA-Z\s\.\-]+$/.test(String(rawNameEn).trim())) ? String(rawNameEn).trim() : cleanName;
+            const finalRelEn = (rawRelEn && /^[a-zA-Z\s\.\-]+$/.test(String(rawRelEn).trim())) ? String(rawRelEn).trim() : (cleanRel.length >= 2 ? cleanRel : (rawRel || ''));
             
             const rawAge = cellVal(row, 'age', 7);
             let ageVal = rawAge ? parseInt(rawAge, 10) : null;
@@ -347,7 +359,13 @@ const ExcelJS = require('exceljs');
             
             let relType = cellVal(row, 'relationType', 9);
             if (!['पिता', 'पति', 'माता', 'अन्य'].includes(relType)) {
-              relType = 'पिता';
+              if (rawRel && /पति|पनत|पनतकपनपम|पनतकप/.test(rawRel)) {
+                relType = 'पति';
+              } else if (rawRel && /माता|मरतर/.test(rawRel)) {
+                relType = 'माता';
+              } else {
+                relType = 'पिता';
+              }
             }
             
             let genderVal = cellVal(row, 'gender', 8);
