@@ -79,11 +79,11 @@ GLYPH_HASH_TO_HINDI = {
     'ddb59861ec': 'ा', '78feea417a': 'ा',
     '940f102545': 'ि', 'cad285f226': 'ि', 'f90e17bc6a': 'ि', 'ee740424e8': 'ि',
     '52e1ecd704': 'िं',
-    '0bfe8aba54': 'ी', 'fd2c68b827': 'ी', '561778e61e': 'ी', '0c38a1de68': 'ी',
-    'eb4776a788': 'ु', '9270cf40b5': 'ु', '634b191808': 'ु',
-    '139503929c': 'ू', '3ba30e63ba': 'पू', '7600b543f9': 'पू', '6a4f928c94': 'पू',
+    '0bfe8aba54': 'ी', 'fd2c68b827': 'ी', '561778e61e': 'ी', '0c38a1de68': 'ी', 'ed49f770d8': 'ी',
+    'eb4776a788': 'ु', '9270cf40b5': 'ु', '634b191808': 'ु', '2ff7d316aa': 'ु',
+    '139503929c': 'ू', 'a8b78a0c82': 'ू', '3ba30e63ba': 'पू', '7600b543f9': 'पू', '6a4f928c94': 'पू',
     '5673f83eb2': 'ृ',
-    'ff774a509c': 'े', 'dc6ebfed73': 'े', 'a394fa367f': 'े',
+    'ff774a509c': 'े', 'dc6ebfed73': 'े', 'a394fa367f': 'े', '612bdfcf33': 'े',
     'e0d2a0aa9a': 'ै',
     '4b894f09df': 'ो', '9777c7fcc8': 'ो',
     '3ed9121507': 'ौ',
@@ -139,7 +139,13 @@ GLYPH_HASH_TO_HINDI = {
     'acae4e4844': 'ह', 'f1bad2c450': 'ह', 'a4274d8f98': 'हु', 'adb8160514': 'हुक', '83692da855': 'हुक', '12fb9d0f09': 'हु',
     'f2e90f726c': 'थ्व', '4d1d034fca': 'द्ध', 'aacdfd3864': 'द्ध', 'd05bddea29': 'द्ध',
 
-    # Universal Cross-District Learned Glyphs (01.pdf, Maulasar, Ramasani Bala)
+    # Universal Cross-District Learned Glyphs (Bahadurpur, Alwar AC 65, Maulasar, Ramasani Bala)
+    '1849710fd2': 'ग', '2ff0d83a39': 'प', 'b9537ce5c0': 'ह', '214c7d8f1c': 'ए',
+    '7effce9d3f': 'य', 'fc0f13f414': 'द', '5f92a2b90b': 'ण', '183cd2c872': 'ण',
+    '6fa368ed38': 'स', '2f4b0eaebc': 'ध', '85eabaed92': 'त', '49604e190a': 'ग',
+    'b17f51eeff': 'स', 'dd62194eac': 'ड', '551b4e4374': 'प', 'c453463076': 'ख',
+    '18defc26f9': 'ज़', '8e384f4373': 'स', '14cfec11aa': 'फ', 'b4b148ef8b': 'द',
+    '18700d123a': 'ज', '3848c3c891': 'क़', '7335bfedf7': 'र', '9511e4627f': 'ख',
     '9ed0305c30': 'ए', '79cddf1cb9': 'ओ', 'cb9f96efec': 'अ', 'c21b1d6645': 'अ', '2807fb8b26': 'ऋ',
     'f3006b2bd4': 'ु', '9608da6ec3': 'ु', 'bd72e8264e': 'ी', 'a887f64657': 'ी',
     '66e5ec4b59': 'े', '1a936145d7': 'े', '9905d0b67d': 'ें',
@@ -528,9 +534,17 @@ def normalize_electoral_hindi(text: str) -> str:
     for pattern, repl in GOV_LEXICON_RULES:
         s = re.sub(pattern, repl, s)
         
-    # Clean surname spacing for optimal voter indexing
+    # Clean surname spacing and standard patronymics for optimal voter indexing
+    s = re.sub(r'\bबबा◌?ू', 'बाबू', s)
+    s = re.sub(r'\bमन्\s*नी', 'मुन्नी', s)
+    s = re.sub(r'\bलणडी', 'लूणी', s)
     s = re.sub(r'([^\s])कंवर\b', r'\1 कंवर', s)
     s = re.sub(r'([^\s])सिंह\b', r'\1 सिंह', s)
+    s = re.sub(r'([^\s])देवी\b', r'\1 देवी', s)
+    s = re.sub(r'([^\s])लाल\b', r'\1 लाल', s)
+    s = re.sub(r'([^\s])चन्द\b', r'\1 चन्द', s)
+    s = re.sub(r'([^\s])कुमार\b', r'\1 कुमार', s)
+    s = re.sub(r'([^\s])राम\b', r'\1 राम', s)
     
     return re.sub(r'\s+', ' ', s).strip()
 
@@ -998,19 +1012,19 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                 continue
             xo_res = xo['/Resources'].get_object()
             fres = xo_res.get('/Font', {}).get_object() if '/Font' in xo_res else {}
-            if '/9' not in fres:
-                continue
-            fo = fres['/9'].get_object()
-            if '/FontDescriptor' in fo and '/FontFile2' in fo['/FontDescriptor']:
-                ff2 = fo['/FontDescriptor']['/FontFile2'].get_data()
-                ch_hash = get_font_glyph_map(ff2)
-                to_uni = parse_to_unicode_map(fo.get('/ToUnicode'))
-                for c_val, g_h in ch_hash.items():
-                    if g_h and g_h not in GLYPH_HASH_TO_HINDI:
-                        u_ch = to_uni.get(c_val)
-                        if u_ch and ('\u0900' <= u_ch <= '\u097F' or u_ch in [' ', '॰']):
-                            GLYPH_HASH_TO_HINDI[g_h] = u_ch
-                            newly_learned_glyphs[g_h] = u_ch
+            for fk, fo_ref in fres.items():
+                fo = fo_ref.get_object()
+                if '/FontDescriptor' in fo and '/FontFile2' in fo['/FontDescriptor']:
+                    ff2 = fo['/FontDescriptor']['/FontFile2'].get_data()
+                    ch_hash = get_font_glyph_map(ff2)
+                    to_uni = parse_to_unicode_map(fo.get('/ToUnicode'))
+                    for c_val, g_h in ch_hash.items():
+                        if g_h and g_h not in GLYPH_HASH_TO_HINDI:
+                            u_ch = to_uni.get(c_val)
+                            # Protect against Rajasthan SEC ToUnicode CMap corruption (where matras are mapped to 'प', 'र', 'ख', etc.)
+                            if u_ch and ('\u0900' <= u_ch <= '\u097F' or u_ch in [' ', '॰']) and c_val not in [0x29, 0x2f, 0x37, 0x52, 0x67, 0x2e, 0x30, 0x53]:
+                                GLYPH_HASH_TO_HINDI[g_h] = u_ch
+                                newly_learned_glyphs[g_h] = u_ch
 
     # Pass 2: High-Precision Voter Card Extraction
     for p_idx in range(2, len(reader.pages) - 1):
@@ -1024,20 +1038,30 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
             if xo.get('/Subtype') != '/Form' or '/Resources' not in xo:
                 continue
             fres = xo['/Resources'].get_object().get('/Font', {}).get_object()
-            if '/9' not in fres:
-                continue
 
-            fo = fres['/9'].get_object()
-            ff2 = fo['/FontDescriptor']['/FontFile2'].get_data()
-            ch_hash = get_font_glyph_map(ff2)
-            to_uni = parse_to_unicode_map(fo.get('/ToUnicode'))
+            font_glyph_maps = {}
+            dev_fonts = set()
+            ascii_fonts = set()
+            for fk, fref in fres.items():
+                fo = fref.get_object()
+                to_uni = parse_to_unicode_map(fo.get('/ToUnicode'))
+                has_dev_uni = any('\u0900' <= u <= '\u097f' for u in to_uni.values())
+                gm = {}
+                if '/FontDescriptor' in fo and '/FontFile2' in fo['/FontDescriptor']:
+                    gm = get_font_glyph_map(fo['/FontDescriptor']['/FontFile2'].get_data())
+                font_glyph_maps[fk] = gm
+                has_dev_hash = any(h in GLYPH_HASH_TO_HINDI for h in gm.values())
+                if has_dev_uni or has_dev_hash:
+                    dev_fonts.add(fk)
+                else:
+                    ascii_fonts.add(fk)
 
             items = parse_pdf_stream_tokens(xo.get_data().decode('latin1'))
 
             serials = []
             for x, y, f, b in items:
                 s_txt = ''.join(chr(c) for c in b).strip()
-                if s_txt.isdigit() and int(s_txt) > 0 and f != '/9' and any(abs(x - target_x) < 5.0 for target_x in [46.7, 53.2, 220.2, 226.8, 393.6, 400.2]):
+                if s_txt.isdigit() and int(s_txt) > 0 and f in ascii_fonts and any(abs(x - target_x) < 5.0 for target_x in [46.7, 53.2, 220.2, 226.8, 393.6, 400.2]):
                     serials.append((int(s_txt), x, y))
 
             for s_num, sx, sy in serials:
@@ -1048,9 +1072,9 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                 hdr_hashes = []
                 for x, y, f, b in items:
                     if sy + 14.0 <= y <= sy + 28.0 and x < 200:
-                        if f == '/9':
-                            hdr_hashes.extend([ch_hash.get(c, '') for c in b])
-                        elif f == '/a':
+                        if f in dev_fonts:
+                            hdr_hashes.extend([font_glyph_maps.get(f, {}).get(c, '') for c in b])
+                        else:
                             txt = ''.join(chr(c) for c in b)
                             if ',' in txt or txt == ' ':
                                 hdr_hashes.append('SPACE')
@@ -1081,43 +1105,44 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                     if not (cb_x <= x <= cb_x + 172.0):
                         continue
                     txt = ''.join(chr(c) for c in b).strip()
+                    ch_hash = font_glyph_maps.get(f, {})
 
                     # EPIC No candidate tokens on top card header
-                    if sy - 5.0 <= y <= sy + 5.0 and cb_x + 25.0 <= x <= cb_x + 165.0 and f != '/9':
+                    if sy - 5.0 <= y <= sy + 5.0 and cb_x + 25.0 <= x <= cb_x + 165.0 and f in ascii_fonts:
                         if txt and not (txt.isdigit() and len(txt) <= 4 and abs(x - sx) < 5.0):
                             epic_tokens.append((x, txt))
 
                     # Voter Name line
                     elif sy - 16.5 <= y <= sy - 11.5:
                         if x >= cb_x + 21.0:
-                            if f == '/9': name_hashes.extend([ch_hash.get(c, '') for c in b])
-                            elif f != '/9' and ' ' in ''.join(chr(c) for c in b): name_hashes.append('SPACE')
+                            if f in dev_fonts: name_hashes.extend([ch_hash.get(c, '') for c in b])
+                            elif ' ' in ''.join(chr(c) for c in b): name_hashes.append('SPACE')
 
                     # Relation line
                     elif sy - 29.5 <= y <= sy - 24.5:
-                        if x < cb_x + 45.0 and f == '/9':
+                        if x < cb_x + 45.0 and f in dev_fonts:
                             rel_type_hashes.extend([ch_hash.get(c, '') for c in b])
                         elif x >= cb_x + 45.0:
-                            if f == '/9': rel_hashes.extend([ch_hash.get(c, '') for c in b])
-                            elif f != '/9' and ' ' in ''.join(chr(c) for c in b): rel_hashes.append('SPACE')
+                            if f in dev_fonts: rel_hashes.extend([ch_hash.get(c, '') for c in b])
+                            elif ' ' in ''.join(chr(c) for c in b): rel_hashes.append('SPACE')
 
                     # House No line
                     elif sy - 48.5 <= y <= sy - 32.0:
                         if cb_x + 35.0 <= x <= cb_x + 130.0:
-                            if f == '/9':
+                            if f in dev_fonts:
                                 house_no_tokens.append((x, decode_hashes_to_hindi([ch_hash.get(c, '') for c in b])))
                             else:
                                 house_no_tokens.append((x, txt))
 
                     # Age & Gender line
                     elif sy - 58.0 <= y <= sy - 49.0:
-                        if f != '/9' and txt.isdigit():
+                        if f in ascii_fonts and txt.isdigit():
                             p_age = int(txt)
                             if 18 <= p_age <= 125:
                                 age_val = p_age
                             elif p_age < 18:
                                 age_val = 20 + p_age
-                        elif f == '/9' and x >= cb_x + 70.0:
+                        elif f in dev_fonts and x >= cb_x + 70.0:
                             gen_hashes.extend([ch_hash.get(c, '') for c in b])
 
                 epic_no = ""
@@ -1149,6 +1174,21 @@ def extract_single_pdf(pdf_path, default_ward=None, default_part=None, include_d
                 rel_hi = decode_hashes_to_hindi(rel_hashes)
                 rel_t_hi = decode_hashes_to_hindi(rel_type_hashes)
                 gen_hi = decode_hashes_to_hindi(gen_hashes)
+
+                # Fallback recovery for isolated form rendering gaps
+                if not name_hi and (epic_no or s_num):
+                    p_txt = page.extract_text() or ""
+                    if epic_no and epic_no in p_txt:
+                        lines = [l.strip() for l in p_txt.split('\n') if l.strip()]
+                        for l_idx, line in enumerate(lines):
+                            if epic_no in line and l_idx >= 2:
+                                cand_cand = lines[l_idx - 2]
+                                if cand_cand and len(cand_cand) >= 2 and not any(k in cand_cand for k in ['Photo', 'Available', 'आयु', 'लिंग', 'मकान', 'संख्या', 'नपम', 'नाम']):
+                                    cand_cand = re.sub(r'शर', 'श्री', cand_cand)
+                                    cand_cand = re.sub(r'चनद', 'चन्द', cand_cand)
+                                    cand_cand = re.sub(r'प', 'ा', cand_cand)
+                                    name_hi = normalize_electoral_hindi(cand_cand)
+                                    break
 
                 # Anti-repetition filter
                 rel_hi = strip_name_from_relative(name_hi, rel_hi)
