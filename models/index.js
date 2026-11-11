@@ -44,8 +44,9 @@ const userSchema = new mongoose.Schema({
   passwordHash: { type: String, required: true },
   initialPassword: { type: String, default: null },
   fullName: { type: String, required: true },
-  phone: { type: String, required: true },
+  phone: { type: String, default: '' },
   role: { type: String, required: true },
+  roleId: { type: String, default: null, index: true },
   subRole: { type: String, default: null },
   scopeType: { type: String, default: null },
   scopeValue: { type: String, default: null },
@@ -98,18 +99,14 @@ const voterSchema = new mongoose.Schema({
 });
 
 // 🚀 Performance Optimization: Compound Indexes
-// Enables ultra-fast O(1) querying and memory-free indexed sorting across millions of records
+// Enables fast index-backed lookups while avoiding strictly redundant prefix indexes to reduce RAM & write IOPS costs
 voterSchema.index({ organizationId: 1, panchayat: 1, wardNo: 1, serialNo: 1 });
 voterSchema.index({ organizationId: 1, panchayat: 1, serialNo: 1 });
-voterSchema.index({ organizationId: 1, panchayat: 1 });
 voterSchema.index({ organizationId: 1, wardNo: 1, partNo: 1, serialNo: 1 });
 voterSchema.index({ organizationId: 1, wardNo: 1, serialNo: 1 });
 voterSchema.index({ organizationId: 1, wardNo: 1, voted: 1, serialNo: 1 });
-voterSchema.index({ organizationId: 1, wardNo: 1, voted: 1 });
 voterSchema.index({ organizationId: 1, partNo: 1, serialNo: 1 });
 voterSchema.index({ organizationId: 1, serialNo: 1 });
-voterSchema.index({ organizationId: 1, wardNo: 1 });
-voterSchema.index({ organizationId: 1, wardNo: 1, partNo: 1 });
 voterSchema.index({ organizationId: 1, wardNo: 1, houseNo: 1 });
 voterSchema.index({ organizationId: 1, houseNo: 1 });
 voterSchema.index({ organizationId: 1, partNo: 1, houseNo: 1 });
@@ -117,18 +114,12 @@ voterSchema.index({ organizationId: 1, familyId: 1 });
 voterSchema.index({ organizationId: 1, epic: 1 });
 voterSchema.index({ organizationId: 1, nameHi: 1 });
 voterSchema.index({ organizationId: 1, mobileNo: 1 });
-voterSchema.index({ organizationId: 1, phone: 1 });
-voterSchema.index({ organizationId: 1, caste: 1 });
 voterSchema.index({ organizationId: 1, caste: 1, wardNo: 1 });
-voterSchema.index({ organizationId: 1, voted: 1 });
 voterSchema.index({ organizationId: 1, surety: 1 });
 voterSchema.index({ organizationId: 1, assignedWorker: 1 });
-voterSchema.index({ organizationId: 1, supportStatus: 1 });
 voterSchema.index({ organizationId: 1, supportStatus: 1, wardNo: 1 });
-voterSchema.index({ organizationId: 1, isMigrant: 1 });
 voterSchema.index({ organizationId: 1, isMigrant: 1, wardNo: 1, serialNo: 1 });
 voterSchema.index({ organizationId: 1, voted: 1, wardNo: 1, partNo: 1, serialNo: 1 });
-voterSchema.index({ organizationId: 1, partNo: 1, voted: 1 });
 voterSchema.index({ organizationId: 1, gender: 1, voted: 1 });
 voterSchema.index({ organizationId: 1, status: 1 });
 
@@ -137,8 +128,7 @@ organizationSchema.index({ isActive: 1, name: 1 });
 organizationSchema.index({ createdAt: -1 });
 
 // User Model Indexes
-userSchema.index({ organizationId: 1, role: 1 });
-userSchema.index({ organizationId: 1, isActive: 1 });
+userSchema.index({ username: 1 }, { sparse: true });
 userSchema.index({ organizationId: 1, role: 1, isActive: 1 });
 
 // 🚀 Performance Optimization: Text Search Index

@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const axios = require('axios');
+const rawAxios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { verifyToken, requireModule, isAdmin } = require('../middleware/authMiddleware');
@@ -8,6 +8,14 @@ const { addVoterAccess, getEffectiveOrgId } = require('../lib/access');
 const { Voter, SlipDispatch, Organization, CampaignTemplate } = require('../models/index');
 const { escapeRegex } = require('../lib/regexUtils');
 const { normalizeDevanagariDigits } = require('../lib/phoneUtils');
+const { executeWithResilience } = require('../lib/outboundService');
+
+// Guarded Meta Graph API client: exponential backoff, circuit breaker, bounded concurrency & daily cap
+const axios = {
+  get: (url, config) => executeWithResilience('meta_whatsapp', () => rawAxios.get(url, config), { maxRetries: 2, countBudget: false }),
+  post: (url, data, config) => executeWithResilience('meta_whatsapp', () => rawAxios.post(url, data, config), { maxRetries: 2, countBudget: true }),
+  delete: (url, config) => executeWithResilience('meta_whatsapp', () => rawAxios.delete(url, config), { maxRetries: 1, countBudget: false }),
+};
 
 /**
  * Resolve effective Meta configuration (Token, Phone ID, WABA ID)
@@ -166,7 +174,7 @@ async function checkMetaHealth(phoneNumberId, token, graphApiVersion = 'v20.0') 
       let solution = wabaError?.possible_solution || 'कृपया Meta Business Manager में पेमेंट मेथड जोड़ें।';
       
       if (errorCode === 141006) {
-        desc = 'Meta Business Manager में WhatsApp Business Account (MOXRATHORE.com) पर पेमेंट मेथड (कार्ड) की त्रुटि है, जिससे Meta ने बिजनेस संदेश भेजना रोक रखा है।';
+        desc = 'Meta Business Manager में WhatsApp Business Account पर पेमेंट मेथड (कार्ड) की त्रुटि है, जिससे Meta ने बिजनेस संदेश भेजना रोक रखा है।';
         solution = 'Meta Business Suite में जाकर नया Payment Method (कार्ड) जोड़ें।';
       }
 
@@ -247,7 +255,7 @@ async function verifyAndDeductCredit(orgId) {
   const updated = await Organization.findOneAndUpdate(
     { _id: org._id, whatsappCredits: { $gt: 0 } },
     { $inc: { whatsappCredits: -1, whatsappUsed: 1 } },
-    { new: true }
+    { returnDocument: 'after' }
   );
 
   if (!updated) {
@@ -262,10 +270,16 @@ async function verifyAndDeductCredit(orgId) {
 
 async function refundCredit(orgId) {
   try {
-    await Organization.updateOne(
-      { _id: orgId },
+    const res = await Organization.updateOne(
+      { _id: orgId, whatsappUsed: { $gt: 0 } },
       { $inc: { whatsappCredits: 1, whatsappUsed: -1 } }
     );
+    if (res.matchedCount === 0) {
+      await Organization.updateOne(
+        { _id: orgId },
+        { $inc: { whatsappCredits: 1 } }
+      );
+    }
   } catch (err) {
     console.error('Error refunding credit:', err.message);
   }
@@ -347,14 +361,14 @@ router.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
-  const expectedToken = process.env.META_WEBHOOK_VERIFY_TOKEN || 'matdata_webhook_verify_token';
+  const expectedToken = (process.env.META_WEBHOOK_VERIFY_TOKEN || '').trim();
 
-  if (mode === 'subscribe' && token === expectedToken) {
+  if (expectedToken && mode === 'subscribe' && token === expectedToken) {
     console.log('✅ Meta WhatsApp Webhook verified successfully!');
     return res.status(200).send(challenge);
   }
 
-  console.warn('❌ Meta WhatsApp Webhook verification mismatch:', { mode, token });
+  console.warn('❌ Meta WhatsApp Webhook verification mismatch:', { mode });
   return res.status(403).json({ error: 'Webhook verification token mismatch' });
 });
 
@@ -364,6 +378,19 @@ router.get('/webhook', (req, res) => {
  */
 router.post('/webhook', async (req, res) => {
   try {
+    const appSecret = (process.env.META_APP_SECRET || '').trim();
+    if (appSecret) {
+      const cryptoNode = require('node:crypto');
+      const signature = req.get('x-hub-signature-256') || '';
+      const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
+      const expectedSig = 'sha256=' + cryptoNode.createHmac('sha256', appSecret).update(rawBody).digest('hex');
+      const sigBuf = Buffer.from(signature);
+      const expBuf = Buffer.from(expectedSig);
+      if (sigBuf.length !== expBuf.length || !cryptoNode.timingSafeEqual(sigBuf, expBuf)) {
+        return res.sendStatus(403);
+      }
+    }
+
     const body = req.body;
 
     if (body.object === 'whatsapp_business_account') {
@@ -432,22 +459,24 @@ router.post('/webhook', async (req, res) => {
               const windowExpiry = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
               const last10 = fromPhone.slice(-10);
-              await SlipDispatch.updateMany(
-                { recipientPhone: new RegExp(last10) },
-                {
-                  $set: { windowExpiresAt: windowExpiry },
-                  $push: {
-                    conversationHistory: {
-                      direction: 'inbound',
-                      text,
-                      status: 'read',
-                      timestamp: now,
-                      messageId: msg.id || null
+              if (last10.length === 10 && /^\d{10}$/.test(last10)) {
+                await SlipDispatch.updateMany(
+                  { recipientPhone: new RegExp(`${last10}$`) },
+                  {
+                    $set: { windowExpiresAt: windowExpiry },
+                    $push: {
+                      conversationHistory: {
+                        direction: 'inbound',
+                        text,
+                        status: 'read',
+                        timestamp: now,
+                        messageId: msg.id || null
+                      }
                     }
                   }
-                }
-              ).catch(() => {});
-              console.log(`WhatsApp Inbound 24h Window Opened for [${fromPhone}]: ${text}`);
+                ).catch(() => {});
+                console.log(`WhatsApp Inbound 24h Window Opened for [${last10}]`);
+              }
             }
           }
         }
@@ -468,6 +497,7 @@ router.post('/webhook', async (req, res) => {
 router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res) => {
   let dispatchId = null;
   let metaAccepted = false;
+  let creditDeducted = false;
   const orgId = req.user.organizationId || 'org_default';
 
   try {
@@ -477,7 +507,6 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
     const phoneNumberId = metaConfig.phoneNumberId;
     const graphApiVersion = metaConfig.graphApiVersion || 'v20.0';
 
-    // Use template selected by Admin or passed from client, falling back to effective org template
     if (!templateName) {
       templateName = metaConfig.templateName || 'voter_campaign_appeal';
     }
@@ -488,7 +517,6 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
       });
     }
 
-    // Proactive Meta Cloud API Account Health & Billing Check
     const health = await checkMetaHealth(phoneNumberId, token, graphApiVersion);
     if (!health.canSendMessage) {
       return res.status(422).json({
@@ -502,31 +530,9 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
       return res.status(400).json({ message: 'वैध मतदाता ID और मोबाइल नंबर आवश्यक है।' });
     }
 
-    // Verify credits and deduct 1 credit
-    const creditCheck = await verifyAndDeductCredit(orgId);
-    if (!creditCheck.ok) {
-      return res.status(403).json({ message: creditCheck.error });
-    }
-
     const recipientPhone = normalizePhoneNumber(phoneNumber);
     if (recipientPhone.length < 10) {
-      await refundCredit(orgId);
       return res.status(400).json({ message: 'कृपया 10 अंकों का वैध मोबाइल नंबर दर्ज करें।' });
-    }
-
-    // Deduplication check: In a single round / 10m window, do not send 10 times to the same phone number
-    const forceSend = req.body.forceSend === true || req.body.force === true;
-    if (!forceSend) {
-      const dedup = checkAndRecordPhoneDispatch(orgId, recipientPhone);
-      if (dedup.alreadySent) {
-        await refundCredit(orgId);
-        return res.json({
-          success: true,
-          deduplicated: true,
-          message: `ℹ️ इस मोबाइल नंबर (${recipientPhone}) पर इसी राउंड में पहले ही संदेश भेजा जा चुका है (${dedup.lastSentAgoSec}s पूर्व)। डुप्लीकेट संदेश रोका गया व क्रेडिट सुरक्षित रहा।`,
-          recipientPhone
-        });
-      }
     }
 
     const query = addVoterAccess(req);
@@ -538,9 +544,29 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
 
     const dbVoter = await Voter.findOne(query).lean();
     if (!dbVoter) {
-      await refundCredit(orgId);
       return res.status(404).json({ message: 'मतदाता रिकॉर्ड नहीं मिला।' });
     }
+
+    // Check deduplication BEFORE deducting credit
+    const forceSend = req.body.forceSend === true || req.body.force === true;
+    if (!forceSend) {
+      const dedup = checkAndRecordPhoneDispatch(orgId, recipientPhone);
+      if (dedup.alreadySent) {
+        return res.json({
+          success: true,
+          deduplicated: true,
+          message: `ℹ️ इस मोबाइल नंबर (${recipientPhone}) पर इसी राउंड में पहले ही संदेश भेजा जा चुका है (${dedup.lastSentAgoSec}s पूर्व)। डुप्लीकेट संदेश रोका गया व क्रेडिट सुरक्षित रहा।`,
+          recipientPhone
+        });
+      }
+    }
+
+    // Verify & deduct 1 credit atomically ONLY after all validations pass
+    const creditCheck = await verifyAndDeductCredit(orgId);
+    if (!creditCheck.ok) {
+      return res.status(403).json({ message: creditCheck.error });
+    }
+    creditDeducted = true;
 
     // Persist phone number to Voter record in DB so it is permanently remembered
     const cleanPhoneDigits = recipientPhone.slice(-10);
@@ -895,7 +921,7 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
       ).catch(() => {});
     }
 
-    if (!metaAccepted) {
+    if (creditDeducted && !metaAccepted) {
       await refundCredit(orgId);
     }
 
@@ -913,36 +939,17 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
  */
 router.post('/send-manual', verifyToken, requireModule('voters'), async (req, res) => {
   const orgId = req.user.organizationId || 'org_default';
+  let creditDeducted = false;
+  let dispatchCompleted = false;
   try {
     const { voterId, phoneNumber, slipImageDataUrl } = req.body;
     if (!voterId || typeof phoneNumber !== 'string' || !/^\+?[\d\s()-]{7,20}$/.test(phoneNumber)) {
       return res.status(400).json({ message: 'वैध मतदाता ID और मोबाइल नंबर आवश्यक है।' });
     }
 
-    const creditCheck = await verifyAndDeductCredit(orgId);
-    if (!creditCheck.ok) {
-      return res.status(403).json({ message: creditCheck.error });
-    }
-
     const recipientPhone = normalizePhoneNumber(phoneNumber);
     if (recipientPhone.length < 10) {
-      await refundCredit(orgId);
       return res.status(400).json({ message: 'कृपया 10 अंकों का वैध मोबाइल नंबर दर्ज करें।' });
-    }
-
-    // Deduplication check: In a single round / 10m window, do not send 10 times to the same phone number
-    const forceSend = req.body.forceSend === true || req.body.force === true;
-    if (!forceSend) {
-      const dedup = checkAndRecordPhoneDispatch(orgId, recipientPhone);
-      if (dedup.alreadySent) {
-        await refundCredit(orgId);
-        return res.json({
-          success: true,
-          deduplicated: true,
-          message: `ℹ️ इस मोबाइल नंबर (${recipientPhone}) पर इसी राउंड में पहले ही संदेश भेजा जा चुका है (${dedup.lastSentAgoSec}s पूर्व)। डुप्लीकेट संदेश रोका गया व क्रेडिट सुरक्षित रहा।`,
-          recipientPhone
-        });
-      }
     }
 
     const query = addVoterAccess(req);
@@ -954,9 +961,28 @@ router.post('/send-manual', verifyToken, requireModule('voters'), async (req, re
 
     const dbVoter = await Voter.findOne(query).lean();
     if (!dbVoter) {
-      await refundCredit(orgId);
       return res.status(404).json({ message: 'मतदाता रिकॉर्ड नहीं मिला।' });
     }
+
+    // Deduplication check BEFORE deducting credit
+    const forceSend = req.body.forceSend === true || req.body.force === true;
+    if (!forceSend) {
+      const dedup = checkAndRecordPhoneDispatch(orgId, recipientPhone);
+      if (dedup.alreadySent) {
+        return res.json({
+          success: true,
+          deduplicated: true,
+          message: `ℹ️ इस मोबाइल नंबर (${recipientPhone}) पर इसी राउंड में पहले ही संदेश भेजा जा चुका है (${dedup.lastSentAgoSec}s पूर्व)। डुप्लीकेट संदेश रोका गया व क्रेडिट सुरक्षित रहा।`,
+          recipientPhone
+        });
+      }
+    }
+
+    const creditCheck = await verifyAndDeductCredit(orgId);
+    if (!creditCheck.ok) {
+      return res.status(403).json({ message: creditCheck.error });
+    }
+    creditDeducted = true;
 
     // Persist phone number to Voter record in DB so it is permanently remembered
     const cleanPhoneDigits = recipientPhone.slice(-10);
@@ -1056,6 +1082,7 @@ ${relativeName ? `• *${relationType}:* ${relativeName}\n` : ''}• *वार�
     }
 
     const waLink = `https://wa.me/${recipientPhone}?text=${encodeURIComponent(messageText)}`;
+    dispatchCompleted = true;
 
     res.json({
       success: true,
@@ -1069,6 +1096,9 @@ ${relativeName ? `• *${relationType}:* ${relativeName}\n` : ''}• *वार�
       hasPhoto: Boolean(savedImage)
     });
   } catch (err) {
+    if (creditDeducted && !dispatchCompleted) {
+      await refundCredit(orgId);
+    }
     console.error('Manual WhatsApp dispatch error:', err.message);
     res.status(500).json({ message: 'मैनुअल WhatsApp संदेश तैयार करने में त्रुटि हुई।' });
   }
@@ -1515,7 +1545,7 @@ function normalizeBodyVariables(raw) {
     '142',
     'राजकीय उच्च प्राथमिक विद्यालय',
     'कक्ष क्रमांक 1',
-    'छगन रावतराम',
+    'मतदाता नमूना',
     'वार्ड 12',
     'बूथ 45'
   ];
@@ -1647,34 +1677,42 @@ router.post('/templates/create', verifyToken, async (req, res) => {
 
     // 4. BUTTONS COMPONENT
     if (Array.isArray(buttons) && buttons.length > 0) {
-      const validButtons = buttons
-        .filter((b) => b && b.text && String(b.text).trim())
-        .map((b) => {
-          const type = (b.type || 'QUICK_REPLY').toUpperCase();
-          if (type === 'PHONE_NUMBER') {
-            return {
-              type: 'PHONE_NUMBER',
-              text: String(b.text).trim().slice(0, 25),
-              phone_number: String(b.phone_number || '+919413879444').trim()
-            };
+      const parsedButtons = [];
+      for (const b of buttons) {
+        if (!b || !b.text || !String(b.text).trim()) continue;
+        const type = (b.type || 'QUICK_REPLY').toUpperCase();
+        if (type === 'PHONE_NUMBER') {
+          const phone = String(b.phone_number || '').trim();
+          if (!phone) {
+            return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'कॉल बटन (Phone Number Button) के लिए वैध फ़ोन नंबर दर्ज करना अनिवार्य है।' });
           }
-          if (type === 'URL') {
-            return {
-              type: 'URL',
-              text: String(b.text).trim().slice(0, 25),
-              url: String(b.url || 'https://vijaysetu.com').trim()
-            };
+          parsedButtons.push({
+            type: 'PHONE_NUMBER',
+            text: String(b.text).trim().slice(0, 25),
+            phone_number: phone
+          });
+        } else if (type === 'URL') {
+          const url = String(b.url || '').trim();
+          if (!url || !/^https?:\/\//i.test(url)) {
+            return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'लिंक बटन (URL Button) के लिए वैध https:// URL दर्ज करना अनिवार्य है।' });
           }
-          return {
+          parsedButtons.push({
+            type: 'URL',
+            text: String(b.text).trim().slice(0, 25),
+            url
+          });
+        } else {
+          parsedButtons.push({
             type: 'QUICK_REPLY',
             text: String(b.text).trim().slice(0, 25)
-          };
-        });
+          });
+        }
+      }
 
-      if (validButtons.length > 0) {
+      if (parsedButtons.length > 0) {
         components.push({
           type: 'BUTTONS',
-          buttons: validButtons
+          buttons: parsedButtons
         });
       }
     }
@@ -1721,7 +1759,7 @@ router.post('/templates/create', verifyToken, async (req, res) => {
           const bodyText = metaPayload.components[bodyIdx].text || '';
           const varCount = (bodyText.match(/\{\{\d+\}\}/g) || []).length;
           if (varCount > 0) {
-            const samplePool = ['रमेश कुमार', 'RJ17105012345', '12', '45', '142', 'राजकीय विद्यालय', 'कक्ष 1', 'छगन रावतराम'];
+            const samplePool = ['रमेश कुमार', 'RJ17105012345', '12', '45', '142', 'राजकीय विद्यालय', 'कक्ष 1', 'मतदाता नमूना'];
             const sampleRow = [];
             for (let i = 1; i <= varCount; i++) {
               sampleRow.push(samplePool[i - 1] || `नमूना ${i}`);
@@ -2185,6 +2223,8 @@ const DEFAULT_APPROVED_CAMPAIGN_TEMPLATES = [
  */
 async function ensureSeedCampaignTemplates() {
   try {
+    const mongoose = require('mongoose');
+    if (mongoose.connection.readyState !== 1) return;
     const count = await CampaignTemplate.countDocuments();
     if (count === 0) {
       for (const item of DEFAULT_APPROVED_CAMPAIGN_TEMPLATES) {
@@ -2198,9 +2238,6 @@ async function ensureSeedCampaignTemplates() {
     console.warn('Failed to seed campaign templates:', err.message);
   }
 }
-
-// Auto-seed on route registration
-ensureSeedCampaignTemplates();
 
 /**
  * GET /api/whatsapp/campaign/templates - Get approved campaign templates for client
@@ -2363,17 +2400,21 @@ router.post('/campaign/send', verifyToken, async (req, res) => {
     if (!Array.isArray(contacts) || contacts.length === 0) {
       return res.status(400).json({ message: 'कम से कम एक संपर्क (फोन नंबर) प्रदान करें।' });
     }
+    if (contacts.length > 5000) {
+      return res.status(400).json({ message: 'एक बार में अधिकतम 5,000 संपर्क ही भेजे जा सकते हैं।' });
+    }
 
     const orgId = getEffectiveOrgId(req) || 'org_default';
     const effectiveMeta = await getEffectiveMetaConfig(orgId);
     const hasMeta = Boolean(effectiveMeta.token && effectiveMeta.phoneNumberId);
 
     const mode = dispatchMode || (hasMeta ? 'meta' : 'manual_web');
-    const createdRecords = [];
+    const recordsToInsert = [];
     const now = new Date();
 
     for (let i = 0; i < contacts.length; i++) {
       const c = contacts[i];
+      if (!c || typeof c !== 'object') continue;
       const rawPhone = String(c.phone || '').trim();
       let digits = rawPhone.replace(/\D/g, '');
       if (digits.startsWith('0') && digits.length === 11) digits = digits.slice(1);
@@ -2385,20 +2426,16 @@ router.post('/campaign/send', verifyToken, async (req, res) => {
       const epic = c.epic || `EPIC${serialNumber}`;
       const voterId = `campaign_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`;
 
-      // Personalize text
-      let personalizedText = messageText || 'सादर जय श्री राम / नमस्कार। आगामी चुनाव हेतु हमारा संकल्प व घोषणा पत्र प्रस्तुत है। अपना अमूल्य आशीर्वाद दें।';
+      let personalizedText = messageText || 'नमस्कार। आगामी चुनाव हेतु हमारा संकल्प व घोषणा पत्र प्रस्तुत है।';
       personalizedText = personalizedText
         .replace(/\{नाम\}|\{name\}/gi, voterName)
         .replace(/\{क्रमांक\}|\{serial\}|\{no\}/gi, String(serialNumber));
 
       const isManual = mode === 'manual_web';
       const initialStatus = isManual ? 'manual_link' : 'sent';
-      const msgId = `wamid.campaign_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+      const msgId = `wamid.campaign_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 8)}`;
 
-      // 24hr customer service window setup (mocking active window for demo/testing or setting to 24h)
-      const windowExpiry = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-
-      const record = new SlipDispatch({
+      recordsToInsert.push({
         _id: `disp_camp_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 6)}`,
         voterId,
         voterEpic: epic,
@@ -2407,19 +2444,19 @@ router.post('/campaign/send', verifyToken, async (req, res) => {
         slipType: templateId === 'ghoshna_patra' ? 'ghoshna_patra' : 'marketing',
         dispatchType: isManual ? 'manual_whatsapp' : 'whatsapp',
         status: initialStatus,
-        deliveredAt: !isManual ? new Date(now.getTime() + 2000) : null,
-        readAt: !isManual && (i % 2 === 0) ? new Date(now.getTime() + 5000) : null,
+        deliveredAt: null,
+        readAt: null,
         messageContent: personalizedText,
         templateName: templateId || 'ghoshna_patra',
         mediaUrl: mediaUrl || '',
-        campaignName: campaignName || 'घोषणा पत्र व जनसंपर्क अभियान 2026',
-        windowExpiresAt: (i % 3 === 0) ? windowExpiry : null, // simulate 24-hr active window for select contacts
+        campaignName: campaignName || 'घोषणा पत्र व जनसंपर्क अभियान',
+        windowExpiresAt: null,
         conversationHistory: [
           {
             direction: 'outbound',
             text: personalizedText,
             mediaUrl: mediaUrl || '',
-            status: (!isManual && i % 2 === 0) ? 'read' : (!isManual ? 'delivered' : 'sent'),
+            status: 'sent',
             timestamp: now,
             messageId: msgId
           }
@@ -2429,35 +2466,23 @@ router.post('/campaign/send', verifyToken, async (req, res) => {
         sentBy: req.user?.fullName || req.user?.email || 'Campaign Admin',
         createdAt: now
       });
-
-      // Also add an automated voter acknowledgment for interactive real WhatsApp experience on a few contacts
-      if (i === 0 || i === 3) {
-        record.windowExpiresAt = windowExpiry;
-        record.conversationHistory.push({
-          direction: 'inbound',
-          text: 'नमस्ते जी, आपका घोषणा पत्र देखा। हमारा परिवार पूर्ण रूप से आपके समर्थन में है! विजयी भवः 🚩',
-          mediaUrl: '',
-          status: 'read',
-          timestamp: new Date(now.getTime() + 60000),
-          messageId: `wamid.inbound_${Date.now()}`
-        });
-        record.readAt = new Date(now.getTime() + 30000);
-        record.status = 'read';
-      }
-
-      await record.save();
-      createdRecords.push(record);
     }
+
+    if (recordsToInsert.length === 0) {
+      return res.status(400).json({ message: 'कोई वैध 10-अंकीय मोबाइल नंबर नहीं मिला।' });
+    }
+
+    await SlipDispatch.insertMany(recordsToInsert, { ordered: false });
 
     res.json({
       success: true,
-      message: `${createdRecords.length} संपर्कों को मार्केटिंग अभियान सफलतापूर्वक शुरू कर दिया गया है।`,
-      count: createdRecords.length,
+      message: `${recordsToInsert.length} संपर्कों को मार्केटिंग अभियान सफलतापूर्वक दर्ज किया गया है।`,
+      count: recordsToInsert.length,
       mode
     });
   } catch (err) {
-    console.error('Campaign send error:', err);
-    res.status(500).json({ message: err.message || 'अभियान भेजने में त्रुटि आई।' });
+    console.error('Campaign send error:', err.message);
+    res.status(500).json({ message: 'अभियान भेजने में त्रुटि आई।' });
   }
 });
 
@@ -2562,10 +2587,19 @@ router.get('/campaign/history', verifyToken, async (req, res) => {
  */
 router.post('/campaign/update-status', verifyToken, async (req, res) => {
   try {
-    const { dispatchId, newStatus, simulateCustomerReply, replyText } = req.body || {};
+    const { dispatchId, newStatus } = req.body || {};
     if (!dispatchId) return res.status(400).json({ message: 'dispatchId आवश्यक है।' });
 
-    const item = await SlipDispatch.findById(dispatchId);
+    const allowedStatuses = new Set(['sent', 'delivered', 'read', 'failed', 'manual_link']);
+    if (newStatus && !allowedStatuses.has(newStatus)) {
+      return res.status(400).json({ message: 'अमान्य स्थिति मान।' });
+    }
+
+    const query = ['admin', 'superadmin'].includes(req.user.role)
+      ? { _id: dispatchId }
+      : { _id: dispatchId, organizationId: req.user.organizationId };
+
+    const item = await SlipDispatch.findOne(query);
     if (!item) return res.status(404).json({ message: 'रिकॉर्ड नहीं मिला।' });
 
     const now = new Date();
@@ -2576,7 +2610,6 @@ router.post('/campaign/update-status', verifyToken, async (req, res) => {
         item.deliveredAt = item.deliveredAt || now;
         item.readAt = now;
       }
-      // Update status in last outbound conversation item
       if (item.conversationHistory && item.conversationHistory.length > 0) {
         for (let i = item.conversationHistory.length - 1; i >= 0; i--) {
           if (item.conversationHistory[i].direction === 'outbound') {
@@ -2587,25 +2620,10 @@ router.post('/campaign/update-status', verifyToken, async (req, res) => {
       }
     }
 
-    if (simulateCustomerReply) {
-      const text = replyText || 'नमस्ते जी, आपका घोषणा पत्र मिल गया है। पूरा समर्थन है!';
-      item.windowExpiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-      item.conversationHistory.push({
-        direction: 'inbound',
-        text,
-        mediaUrl: '',
-        status: 'read',
-        timestamp: now,
-        messageId: `wamid.sim_${Date.now()}`
-      });
-      item.status = 'read';
-      item.readAt = now;
-    }
-
     await item.save();
     res.json({ success: true, item });
   } catch (err) {
-    res.status(500).json({ message: err.message || 'स्थिति अपडेट नहीं हो सकी।' });
+    res.status(500).json({ message: 'स्थिति अपडेट नहीं हो सकी।' });
   }
 });
 
@@ -2617,7 +2635,11 @@ router.post('/campaign/send-chat-reply', verifyToken, async (req, res) => {
     const { dispatchId, text, mediaUrl } = req.body || {};
     if (!dispatchId || !text) return res.status(400).json({ message: 'dispatchId और text आवश्यक हैं।' });
 
-    const item = await SlipDispatch.findById(dispatchId);
+    const query = ['admin', 'superadmin'].includes(req.user.role)
+      ? { _id: dispatchId }
+      : { _id: dispatchId, organizationId: req.user.organizationId };
+
+    const item = await SlipDispatch.findOne(query);
     if (!item) return res.status(404).json({ message: 'रिकॉर्ड नहीं मिला।' });
 
     const now = new Date();
@@ -2625,20 +2647,19 @@ router.post('/campaign/send-chat-reply', verifyToken, async (req, res) => {
 
     item.conversationHistory.push({
       direction: 'outbound',
-      text,
+      text: String(text).slice(0, 4096),
       mediaUrl: mediaUrl || '',
       status: 'sent',
       timestamp: now,
       messageId: msgId
     });
 
-    // Automatically transition to delivered/read after slight delay
     item.status = 'sent';
     await item.save();
 
     res.json({ success: true, conversation: item.conversationHistory });
   } catch (err) {
-    res.status(500).json({ message: err.message || 'जवाब नहीं भेजा जा सका।' });
+    res.status(500).json({ message: 'जवाब नहीं भेजा जा सका।' });
   }
 });
 

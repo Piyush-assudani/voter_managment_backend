@@ -161,7 +161,7 @@ router.get('/all', verifyToken, requireModule('voters', 'poll-desk', 'turnout', 
     const voters = await Voter.find(query)
       .select('serialNo voted nameHi nameEn relativeNameHi relativeNameEn epic houseNo age gender mobileNo wardNo partNo photoUrl')
       .sort({ wardNo: 1, partNo: 1, serialNo: 1 })
-      .collation({ locale: 'en', numericOrdering: true })
+      .limit(15000)
       .lean();
     
     // Set Cache
@@ -320,7 +320,6 @@ router.get('/turnout-pending', verifyToken, requireModule('voters', 'poll-desk',
       Voter.countDocuments(query),
       Voter.find(query, projection)
         .sort({ wardNo: 1, partNo: 1, serialNo: 1 })
-        .collation({ locale: 'en', numericOrdering: true })
         .skip(skip)
         .limit(limit)
         .lean()
@@ -358,35 +357,43 @@ router.get('/wards-summary', verifyToken, requireModule('voters', 'community', '
     const cacheKey = `wards_summary_${orgId}_${panchayat ? encodeURIComponent(panchayat.trim()) : 'all'}_${req.user.id}`;
     const cached = cache.get(cacheKey);
     if (cached) return res.json(cached);
-    const [rawWards, total, familyFacet] = await Promise.all([
-      Voter.aggregate([
-        { $match: query },
-        { $group: { _id: '$wardNo', count: { $sum: 1 } } }
-      ]),
-      Voter.countDocuments(query),
-      Voter.aggregate([
-        {
-          $match: {
-            ...query,
-            houseNo: {
-              $exists: true,
-              $nin: [null, '', '-', '—', "'—", "'0", '0', '00', '000', 'NA', 'na', 'N/A', 'n/a', 'null', 'undefined', 'लागू नहीं', 'उपलब्ध नहीं']
-            }
-          }
-        },
-        {
-          $group: {
-            _id: {
-              houseNo: '$houseNo',
-              wardNo: { $ifNull: ['$wardNo', ''] },
-              panchayat: { $ifNull: ['$panchayat', ''] },
-              partNo: { $ifNull: ['$partNo', ''] }
-            }
-          }
-        },
-        { $count: 'totalFamilies' }
-      ])
+    const [summaryFacet] = await Voter.aggregate([
+      { $match: query },
+      {
+        $facet: {
+          rawWards: [
+            { $group: { _id: '$wardNo', count: { $sum: 1 } } }
+          ],
+          totalCount: [
+            { $count: 'total' }
+          ],
+          familyCount: [
+            {
+              $match: {
+                houseNo: {
+                  $exists: true,
+                  $nin: [null, '', '-', '—', "'—", "'0", '0', '00', '000', 'NA', 'na', 'N/A', 'n/a', 'null', 'undefined', 'लागू नहीं', 'उपलब्ध नहीं']
+                }
+              }
+            },
+            {
+              $group: {
+                _id: {
+                  houseNo: '$houseNo',
+                  wardNo: { $ifNull: ['$wardNo', ''] },
+                  panchayat: { $ifNull: ['$panchayat', ''] },
+                  partNo: { $ifNull: ['$partNo', ''] }
+                }
+              }
+            },
+            { $count: 'totalFamilies' }
+          ]
+        }
+      }
     ]);
+    const rawWards = summaryFacet?.rawWards || [];
+    const total = summaryFacet?.totalCount?.[0]?.total || 0;
+    const familyFacet = summaryFacet?.familyCount || [];
     const wards = rawWards
       .filter((w) => {
         if (w._id === null || w._id === undefined) return false;
@@ -422,14 +429,23 @@ router.get('/panchayats-summary', verifyToken, requireModule('voters', 'communit
     const cacheKey = `panchayats_summary_${orgId}_${req.user.id}`;
     const cached = cache.get(cacheKey);
     if (cached) return res.json(cached);
-    const rawPanchayats = await Voter.aggregate([
-      { $match: { ...query, panchayat: { $exists: true, $ne: '' } } },
-      { $group: { _id: '$panchayat', count: { $sum: 1 } } }
+    const [facet] = await Voter.aggregate([
+      { $match: query },
+      {
+        $facet: {
+          panchayats: [
+            { $match: { panchayat: { $exists: true, $ne: '' } } },
+            { $group: { _id: '$panchayat', count: { $sum: 1 } } }
+          ],
+          totalCount: [{ $count: 'total' }]
+        }
+      }
     ]);
+    const rawPanchayats = facet?.panchayats || [];
     const panchayats = rawPanchayats
       .filter((p) => p._id !== null && p._id !== undefined && String(p._id).trim() !== '')
       .sort((a, b) => String(a._id).localeCompare(String(b._id)));
-    const total = await Voter.countDocuments(query);
+    const total = facet?.totalCount?.[0]?.total || 0;
     const result = { panchayats, total };
     cache.set(cacheKey, result, 300);
     res.json(result);
@@ -451,41 +467,60 @@ router.get('/issues-summary', verifyToken, requireModule('voters'), async (req, 
       applyPanchayatFilter(query, panchayat.trim());
     }
 
-    const [totalVoters, missingEpicCount, missingHouseCount, deletedCount, missingPhoneCount] = await Promise.all([
-      Voter.countDocuments(query),
-      Voter.countDocuments({
-        ...query,
-        $or: [
-          { epic: { $regex: '^VOTER_' } },
-          { epic: { $regex: '^UNREADABLE_' } },
-          { epic: '' },
-          { epic: null },
-          { epic: '-' }
-        ]
-      }),
-      Voter.countDocuments({
-        ...query,
-        $or: [
-          { houseNo: '' },
-          { houseNo: null },
-          { houseNo: '-' },
-          { houseNo: '0' },
-          { houseNo: '00' }
-        ]
-      }),
-      Voter.countDocuments({
-        ...query,
-        status: { $in: ['Deleted', 'विलोपित'] }
-      }),
-      Voter.countDocuments({
-        ...query,
-        $or: [
-          { mobileNo: '' },
-          { mobileNo: null },
-          { mobileNo: '-' }
-        ]
-      })
+    const [agg] = await Voter.aggregate([
+      { $match: query },
+      {
+        $group: {
+          _id: null,
+          totalVoters: { $sum: 1 },
+          missingEpicCount: {
+            $sum: {
+              $cond: [
+                {
+                  $or: [
+                    { $eq: ['$epic', ''] },
+                    { $eq: ['$epic', null] },
+                    { $eq: ['$epic', '-'] },
+                    { $regexMatch: { input: { $ifNull: ['$epic', ''] }, regex: /^(VOTER_|UNREADABLE_)/ } }
+                  ]
+                },
+                1,
+                0
+              ]
+            }
+          },
+          missingHouseCount: {
+            $sum: {
+              $cond: [
+                { $in: [{ $ifNull: ['$houseNo', ''] }, ['', '-', '0', '00']] },
+                1,
+                0
+              ]
+            }
+          },
+          deletedCount: {
+            $sum: {
+              $cond: [{ $in: ['$status', ['Deleted', 'विलोपित']] }, 1, 0]
+            }
+          },
+          missingPhoneCount: {
+            $sum: {
+              $cond: [
+                { $in: [{ $ifNull: ['$mobileNo', ''] }, ['', '-']] },
+                1,
+                0
+              ]
+            }
+          }
+        }
+      }
     ]);
+
+    const totalVoters = agg?.totalVoters || 0;
+    const missingEpicCount = agg?.missingEpicCount || 0;
+    const missingHouseCount = agg?.missingHouseCount || 0;
+    const deletedCount = agg?.deletedCount || 0;
+    const missingPhoneCount = agg?.missingPhoneCount || 0;
 
     const totalIssues = missingEpicCount + missingHouseCount + deletedCount;
 
@@ -847,7 +882,6 @@ router.get('/', verifyToken, requireModule('voters', 'community', 'workers', 'mi
     // Execute count and paginated query in parallel for 2x faster responses
     const voterQuery = Voter.find(query)
       .sort({ wardNo: 1, partNo: 1, serialNo: 1 })
-      .collation({ locale: 'en', numericOrdering: true })
       .lean();
     if (!isAll) {
       voterQuery.skip((page - 1) * pageSize).limit(pageSize);

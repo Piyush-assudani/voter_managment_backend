@@ -127,8 +127,8 @@ async function runMonkeyTests() {
     // Test Array of Arrays with Headers
     const headers = ['क्र.सं.', 'नाम', 'फोन'];
     const rows = [
-      [1, 'सुरेश जांगिड़', '9413879444'],
-      [2, 'पीयूष आसुदानी', '9876543210']
+      [1, 'मतदाता १', '9000000001'],
+      [2, 'मतदाता २', '9000000002']
     ];
     addSheet(wb, 'Sheet1', headers, rows);
     
@@ -176,14 +176,52 @@ async function runMonkeyTests() {
     assert(false, `Base64 preservation test failed: ${err.message}`);
   }
 
-  // 7. Generate a valid admin token for authenticated testing
-  const JWT_SECRET = process.env.JWT_SECRET || 'MatdataPortal_on_top';
-  const testOrg = await Organization.findOne().lean() || { _id: 'org_demo_election_2025' };
+  // 7. Seed isolated test organization, admin user & voter, then sign JWT with active secret
+  const { getJwtSecret } = require('../middleware/authMiddleware');
+  const JWT_SECRET = getJwtSecret();
+  let testOrg = await Organization.findOne().lean();
+  if (!testOrg) {
+    testOrg = await Organization.create({
+      _id: 'org_monkey_test',
+      name: 'Monkey Test Org',
+      isActive: true,
+      enabledModules: ['voters', 'poll-desk', 'turnout', 'warroom', 'history', 'community', 'workers', 'migrants'],
+    });
+  }
+  await User.findOneAndUpdate(
+    { _id: 'user_monkey_admin' },
+    {
+      _id: 'user_monkey_admin',
+      email: 'monkey-admin@example.test',
+      fullName: 'Monkey Admin',
+      passwordHash: '$2a$10$dummyhashfortestingonly12345678901234567890123456',
+      role: 'admin',
+      organizationId: testOrg._id,
+      isActive: true,
+    },
+    { upsert: true, new: true }
+  );
+  await Voter.findOneAndUpdate(
+    { _id: 'voter_monkey_sample_1' },
+    {
+      _id: 'voter_monkey_sample_1',
+      organizationId: testOrg._id,
+      wardNo: '1',
+      partNo: '1',
+      serialNo: 1,
+      nameHi: 'राम कुमार',
+      nameEn: 'Ram Kumar',
+      age: 30,
+      gender: 'पुरुष',
+      epic: 'EPICMONKEY1',
+    },
+    { upsert: true, new: true }
+  );
   const adminToken = jwt.sign(
     {
       user: {
-        id: 'user_admin_master_matdata',
-        email: 'matdata@matdataportal.com',
+        id: 'user_monkey_admin',
+        email: 'monkey-admin@example.test',
         role: 'admin',
         organizationId: testOrg._id,
         modules: ['voters', 'poll-desk', 'turnout', 'warroom', 'history', 'community', 'workers', 'migrants']

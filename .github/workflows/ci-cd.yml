@@ -1,0 +1,64 @@
+name: VijaySetu Backend CI/CD Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  secret-and-hygiene-gate:
+    name: Secret & Temp-Script Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject leaked secrets, env files, backups, or temp QA scripts
+        run: |
+          if git ls-files | grep -E '(\.env($|\.)|backups/|dictator_qa|service-account.*\.json$|\.pem$|\.key$)'; then
+            echo "::error::Forbidden untracked secret/backup/temp file matched tracked git index!"
+            exit 1
+          fi
+          if git grep -nE '(sk-or-v1-[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_-]{20,}|gsk_[A-Za-z0-9]{16,}|mongodb\+srv://[^/\s]+:[^@\s]+@|cloudinary://[0-9]+:[^@\s]+@)' -- ':(exclude).github/workflows/ci-cd.yml'; then
+            echo "::error::Hardcoded API credential or DB URI detected in source!"
+            exit 1
+          fi
+
+  syntax-and-tests:
+    name: Isolated E2E, RBAC, Concurrency & Unit Tests
+    needs: secret-and-hygiene-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Syntax check all backend JavaScript files
+        run: find . -maxdepth 3 -name "*.js" ! -path "*/node_modules/*" -exec node -c {} +
+      - name: Run family service unit tests
+        run: npm run test:family
+      - name: Run Devanagari glyph normalizer unit tests
+        run: npm run test:glyph
+      - name: Run isolated MongoMemoryServer stress suite
+        env:
+          ALLOW_INMEMORY_DB: 'true'
+          MONGO_URI: ''
+          NODE_ENV: test
+          JWT_SECRET: ci_test_jwt_secret_minimum_length_32_chars
+        run: npm test
+      - name: Run chaos & edge-case suite
+        env:
+          ALLOW_INMEMORY_DB: 'true'
+          MONGO_URI: ''
+          NODE_ENV: test
+          JWT_SECRET: ci_test_jwt_secret_minimum_length_32_chars
+        run: npm run test:chaos && npm run test:monkey
+      - name: Run isolated E2E smoke test
+        env:
+          ALLOW_INMEMORY_DB: 'true'
+          MONGO_URI: ''
+          NODE_ENV: test
+          JWT_SECRET: ci_test_jwt_secret_minimum_length_32_chars
+        run: npm run test:e2e
+

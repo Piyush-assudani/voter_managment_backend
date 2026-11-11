@@ -2,30 +2,31 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cache = require('../lib/cache');
 const { User, Organization, Voter } = require('../models/index');
+const { getJwtSecret, invalidateUserAuthCache } = require('../middleware/authMiddleware');
 
 exports.register = async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
-      || typeof password !== 'string' || password.length < 8) {
-      return res.status(400).json({ message: 'A valid email and a password of at least 8 characters are required.' });
+    if (typeof email !== 'string' || email.trim().length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
+      || typeof password !== 'string' || password.length < 8 || password.length > 256) {
+      return res.status(400).json({ message: 'A valid email and a password of 8-256 characters are required.' });
     }
     const normalizedEmail = email.trim().toLowerCase();
     
-    const existing = await User.findOne({ email: normalizedEmail });
+    const existing = await User.findOne({ email: normalizedEmail }).lean();
     if (existing) {
       return res.status(409).json({ message: 'An account with this email already exists.' });
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
     const user = new User({
-      _id: 'user_' + Date.now(),
+      _id: `user_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       email: normalizedEmail,
-      passwordHash: passwordHash,
+      passwordHash,
       fullName: normalizedEmail.split('@')[0],
-      phone: '0000000000',
+      phone: '',
       role: 'worker',
-      organizationId: req.user.organizationId || 'org_default'
+      organizationId: req.user?.organizationId || 'org_default'
     });
     
     await user.save();
@@ -40,8 +41,8 @@ exports.login = async (req, res) => {
   try {
     const { email, password, username } = req.body || {};
     const loginIdentifier = String(email || username || '').trim();
-    if (!loginIdentifier || typeof password !== 'string') {
-      return res.status(400).json({ message: 'Email/Username and password are required.' });
+    if (!loginIdentifier || loginIdentifier.length > 256 || typeof password !== 'string' || !password || password.length > 256) {
+      return res.status(400).json({ message: 'Valid Email/Username and password are required.' });
     }
 
     const safeRegex = loginIdentifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -56,21 +57,21 @@ exports.login = async (req, res) => {
         { email: prefixRegex },
         { fullName: exactRegex }
       ]
-    });
+    }).lean();
     if (!user) return res.status(400).json({ message: 'गलत ईमेल/यूज़रनेम या पासवर्ड (Invalid Credentials)' });
     
-    const org = await Organization.findById(user.organizationId);
+    const org = await Organization.findById(user.organizationId).lean();
     if (!org) return res.status(403).json({ message: 'Organization not found.' });
     
     if (user.isActive === false || org.isActive === false) {
+      const supportPhone = (process.env.SUPPORT_PHONE || '').trim();
       return res.status(403).json({
         code: 'ACCOUNT_SUSPENDED',
         error: 'Account Suspended',
         message: 'आपका खाता एडमिन द्वारा बंद (Suspend) किया गया है। कृपया आगे की सेवा के लिए एडमिन से संपर्क करें।',
         contact: {
-          name: 'Roots Reach Media',
-          phone: '7231077770',
-          formattedPhone: '+91 72310 77770'
+          name: (process.env.SUPPORT_BRAND_NAME || 'VijaySetu Support').trim(),
+          ...(supportPhone ? { phone: supportPhone, formattedPhone: supportPhone } : {})
         }
       });
     }
@@ -102,31 +103,24 @@ exports.login = async (req, res) => {
       }
     };
 
-    jwt.sign(
-      payload,
-      process.env.JWT_SECRET,
-      { expiresIn: '365d' },
-      (err, token) => {
-        if (err) throw err;
-        res.json({
-          token,
-          user: {
-            id: user._id,
-            email: user.email,
-            name: user.fullName || user.email,
-            role: user.role,
-            subRole: user.subRole || user.role,
-            organizationId: user.organizationId,
-            organizationName: org.name || '',
-            scope: user.scopeType || 'All',
-            scopeValue: user.scopeValue || '',
-            modules: enabledModules,
-            allowedWards: org.allowedWards || [],
-            settings: org.settings || { hidePartNo: true },
-          },
-        });
-      }
-    );
+    const token = jwt.sign(payload, getJwtSecret(), { expiresIn: '365d' });
+    return res.json({
+      token,
+      user: {
+        id: user._id,
+        email: user.email,
+        name: user.fullName || user.email,
+        role: user.role,
+        subRole: user.subRole || user.role,
+        organizationId: user.organizationId,
+        organizationName: org.name || '',
+        scope: user.scopeType || 'All',
+        scopeValue: user.scopeValue || '',
+        modules: enabledModules,
+        allowedWards: org.allowedWards || [],
+        settings: org.settings || { hidePartNo: true },
+      },
+    });
   } catch (err) {
     console.error('Login failed:', err.message);
     res.status(500).json({ message: 'Login could not be completed.' });
@@ -217,6 +211,7 @@ exports.changePassword = async (req, res) => {
 
     user.passwordHash = await bcrypt.hash(newPassword, 10);
     await user.save();
+    invalidateUserAuthCache(userId);
 
     res.json({ message: 'Password changed successfully.' });
   } catch (err) {

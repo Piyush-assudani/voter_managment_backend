@@ -25,6 +25,9 @@ local.properties
 # ==========================================
 uploads/
 uploads/**
+backups/
+backups/**
+data/savita_*.json
 temp/
 tmp/
 *.traineddata
@@ -39,6 +42,9 @@ tmp/
 # Maintenance / Temporary scripts
 scripts/seed_demo_accounts.js
 scripts/apply_accuracy_update.js
+dictator_qa*.js
+*.backup.json.gz
+*.sha256
 
 # Python cache & OCR runtime
 __pycache__/

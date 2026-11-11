@@ -1,7 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const { User, Organization, Voter } = require('../models/index');
-const { verifyToken, isOrganizationAdmin, requireModule } = require('../middleware/authMiddleware');
+const { verifyToken, isOrganizationAdmin, requireModule, invalidateUserAuthCache } = require('../middleware/authMiddleware');
 const { getEffectiveOrgId } = require('../lib/access');
 
 const router = express.Router();
@@ -115,6 +115,7 @@ router.put('/profile', verifyToken, async (req, res) => {
       fullName: name.trim(),
       phone: phone.trim()
     }, { returnDocument: 'after' }).lean();
+    invalidateUserAuthCache(req.user.id);
     
     res.json({
       message: 'Profile updated successfully.',
@@ -179,13 +180,14 @@ router.post('/', verifyToken, isOrganizationAdmin, async (req, res) => {
     }
     
     const passwordHash = await bcrypt.hash(password, 10);
-    
+    const createdUserId = `user_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
     await User.create({
-      _id: `user_${Date.now()}_${Math.floor(Math.random()*1000)}`,
+      _id: createdUserId,
       email: email.trim().toLowerCase(),
-      passwordHash: passwordHash,
+      passwordHash,
       fullName: name.trim(),
-      phone: typeof phone === 'string' ? phone.trim() : '0000000000',
+      phone: typeof phone === 'string' ? phone.trim() : '',
       role: accountRole,
       organizationId: orgId,
       subRole: accountRole === 'worker' ? req.body.subRole : null,
@@ -194,6 +196,19 @@ router.post('/', verifyToken, isOrganizationAdmin, async (req, res) => {
       modules: accountRole === 'worker' ? req.body.modules : [],
       isActive: true
     });
+
+    // Post-insert concurrency verification: keep the earliest 10 active workers deterministically and roll back excess seats
+    if (accountRole === 'worker') {
+      const topTenWorkers = await User.find({ organizationId: orgId, role: 'worker', isActive: true })
+        .sort({ createdAt: 1, _id: 1 })
+        .limit(10)
+        .select('_id')
+        .lean();
+      if (!topTenWorkers.some((w) => String(w._id) === String(createdUserId))) {
+        await User.deleteOne({ _id: createdUserId }).catch(() => {});
+        return res.status(409).json({ message: 'This organization has reached its limit of 10 active workers.' });
+      }
+    }
     
     res.status(201).json({ message: 'Account created successfully.' });
   } catch (err) {
@@ -218,6 +233,7 @@ router.put('/:id', verifyToken, isOrganizationAdmin, async (req, res) => {
       const passwordHash = await bcrypt.hash(req.body.password, 10);
       const user = await User.findOneAndUpdate(query, { $set: { passwordHash } }, { returnDocument: 'after' });
       if (!user) return res.status(404).json({ message: 'Account not found or access denied.' });
+      invalidateUserAuthCache(req.params.id);
       return res.json({ message: 'Account password updated successfully.' });
     }
 
@@ -242,6 +258,7 @@ router.put('/:id', verifyToken, isOrganizationAdmin, async (req, res) => {
 
     const user = await User.findOneAndUpdate(query, { $set: update }, { returnDocument: 'after' });
     if (!user) return res.status(404).json({ message: 'Account not found or access denied.' });
+    invalidateUserAuthCache(req.params.id);
     res.json({ message: 'Account updated successfully.' });
   } catch (err) {
     console.error('Account update failed:', err.message);
@@ -258,6 +275,7 @@ router.put('/:id/active', verifyToken, isOrganizationAdmin, async (req, res) => 
     if (!isPlatformAdmin(req)) query.organizationId = orgFor(req);
     const user = await User.findOneAndUpdate(query, { $set: { isActive: false } }, { returnDocument: 'after' });
     if (!user) return res.status(404).json({ message: 'Account not found or access denied.' });
+    invalidateUserAuthCache(req.params.id);
     res.json({ message: 'Account disabled successfully.' });
   } catch (err) {
     console.error('Account deactivation failed:', err.message);
@@ -272,6 +290,7 @@ router.delete('/:id', verifyToken, isOrganizationAdmin, async (req, res) => {
 
     const result = await User.deleteOne(query);
     if (result.deletedCount === 0) return res.status(404).json({ message: 'Account not found or access denied.' });
+    invalidateUserAuthCache(req.params.id);
     res.json({ message: 'Account deleted successfully.' });
   } catch (err) {
     console.error('Account deletion failed:', err.message);

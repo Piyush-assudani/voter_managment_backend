@@ -69,7 +69,7 @@ def _call_openrouter_api(prompt: str, timeout: int = 15) -> Optional[str]:
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://vijaysetu.piyushassudani.in",
+        "HTTP-Referer": os.environ.get("PUBLIC_URL", "https://vijaysetu.local"),
         "X-Title": "VijaySetu Electoral Roll AI Resolver"
     }
 

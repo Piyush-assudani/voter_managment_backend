@@ -7,6 +7,17 @@ const cache = require('../lib/cache');
 
 const router = express.Router();
 
+const appendOrFilter = (targetQuery, orArray) => {
+  if (targetQuery.$and) {
+    targetQuery.$and.push({ $or: orArray });
+  } else if (targetQuery.$or) {
+    targetQuery.$and = [{ $or: targetQuery.$or }, { $or: orArray }];
+    delete targetQuery.$or;
+  } else {
+    targetQuery.$or = orArray;
+  }
+};
+
 const formatVoter = (row) => ({
   _id: row._id,
   sqlId: row.sqlId,
@@ -605,31 +616,31 @@ router.get('/dispatches', requireModule('history'), async (req, res) => {
     if (typeof req.query.search === 'string' && req.query.search.trim()) {
       if (req.query.search.trim().length > 150) return res.status(400).json({ message: 'Search must be 150 characters or fewer.' });
       const search = new RegExp(escapeRegex(req.query.search.trim()), 'i');
-      query.$or = [
+      appendOrFilter(query, [
         { voterName: search },
         { voterEpic: search },
         { recipientPhone: search },
-      ];
+      ]);
     }
     if (typeof req.query.status === 'string' && req.query.status) {
       if (req.query.status === 'sent') {
         query.status = 'sent';
         query.dispatchType = { $ne: 'manual_whatsapp' };
       } else if (req.query.status === 'delivered') {
-        query.$or = [
+        appendOrFilter(query, [
           { status: 'delivered' },
           { deliveredAt: { $ne: null } }
-        ];
+        ]);
       } else if (req.query.status === 'read') {
-        query.$or = [
+        appendOrFilter(query, [
           { status: 'read' },
           { readAt: { $ne: null } }
-        ];
+        ]);
       } else if (req.query.status === 'manual_link') {
-        query.$or = [
+        appendOrFilter(query, [
           { dispatchType: 'manual_whatsapp' },
           { status: 'manual_link' }
-        ];
+        ]);
       } else if (['failed', 'sending'].includes(req.query.status)) {
         query.status = req.query.status;
       } else {
@@ -798,21 +809,21 @@ router.get('/export.xlsx', async (req, res) => {
       }
       if (typeof req.query.search === 'string' && req.query.search.trim()) {
         const search = new RegExp(escapeRegex(req.query.search.trim()), 'i');
-        dispatchQuery.$or = [
+        appendOrFilter(dispatchQuery, [
           { voterName: search },
           { voterEpic: search },
           { recipientPhone: search },
-        ];
+        ]);
       }
       if (typeof req.query.status === 'string' && req.query.status) {
         if (req.query.status === 'sent') {
           dispatchQuery.status = 'sent';
           dispatchQuery.dispatchType = { $ne: 'manual_whatsapp' };
         } else if (req.query.status === 'manual_link') {
-          dispatchQuery.$or = [
+          appendOrFilter(dispatchQuery, [
             { dispatchType: 'manual_whatsapp' },
             { status: 'manual_link' }
-          ];
+          ]);
         } else if (['failed', 'sending'].includes(req.query.status)) {
           dispatchQuery.status = req.query.status;
         } else {

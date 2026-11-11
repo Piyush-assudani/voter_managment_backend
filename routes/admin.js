@@ -5,10 +5,23 @@ const ExcelJS = require('exceljs');
 const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
 const { Organization, User, Voter, Lead, SystemSetting, SlipDispatch } = require('../models/index');
-const { verifyToken, isAdmin } = require('../middleware/authMiddleware');
+const { verifyToken, isAdmin, invalidateOrgAuthCache, invalidateUserAuthCache } = require('../middleware/authMiddleware');
 const { createWorkbook, addSheet, sendWorkbook } = require('../lib/xlsx');
 const { predictCaste, cleanVillageOrSectionName } = require('../lib/fuzzyNameMatcher');
 const cache = require('../lib/cache');
+const {
+  createDatabaseBackup,
+  listBackups,
+  getBackupFilePath,
+  verifyBackupIntegrity,
+  restoreDatabaseBackup
+} = require('../lib/backupService');
+const { listRecentErrors, resolveTrackedError } = require('../lib/errorTracker');
+const { getOutboundHealthSnapshot } = require('../lib/outboundService');
+
+const canAccessOrganization = (req, orgId) => (
+  Boolean(req.user && orgId && (req.user.role === 'admin' || req.user.organizationId === orgId))
+);
 
 const router = express.Router();
 const upload = multer({
@@ -108,26 +121,68 @@ router.get('/diagnose-photo-pipeline', verifyToken, isAdmin, async (_req, res) =
 router.get('/organizations', verifyToken, isAdmin, async (_req, res) => {
   try {
     const orgs = await Organization.find({ _id: { $ne: 'org_default' } }).sort({ createdAt: -1 }).lean();
-    
-    const result = await Promise.all(orgs.map(async (o) => {
-      const adminCount = await User.countDocuments({ organizationId: o._id, role: 'tenant_admin' });
-      const activeWorkers = await User.countDocuments({ organizationId: o._id, role: 'worker', isActive: true });
-      const voterCount = await Voter.countDocuments({ organizationId: o._id });
+    const orgIds = orgs.map((o) => o._id);
 
-      let adminEmail = o.adminEmail || '';
-      let initialPassword = o.initialPassword || o.demoPassword || '';
-      if (!adminEmail || !initialPassword) {
-        const adminUser = await User.findOne({ organizationId: o._id, role: 'tenant_admin' }).lean();
-        if (adminUser) {
-          adminEmail = adminEmail || adminUser.email || '';
-          initialPassword = initialPassword || adminUser.initialPassword || adminUser.demoPassword || '';
-        }
+    const [userStats, voterStats, tenantAdmins] = await Promise.all([
+      orgIds.length > 0
+        ? User.aggregate([
+            { $match: { organizationId: { $in: orgIds } } },
+            {
+              $group: {
+                _id: '$organizationId',
+                adminCount: { $sum: { $cond: [{ $eq: ['$role', 'tenant_admin'] }, 1, 0] } },
+                activeWorkers: {
+                  $sum: {
+                    $cond: [
+                      { $and: [{ $eq: ['$role', 'worker'] }, { $eq: ['$isActive', true] }] },
+                      1,
+                      0
+                    ]
+                  }
+                }
+              }
+            }
+          ])
+        : [],
+      orgIds.length > 0
+        ? Voter.aggregate([
+            { $match: { organizationId: { $in: orgIds } } },
+            { $group: { _id: '$organizationId', count: { $sum: 1 } } }
+          ])
+        : [],
+      orgIds.length > 0
+        ? User.find({ organizationId: { $in: orgIds }, role: 'tenant_admin' })
+            .select('organizationId email initialPassword demoPassword')
+            .lean()
+        : []
+    ]);
+
+    const userStatMap = new Map(userStats.map((u) => [u._id, u]));
+    const voterCountMap = new Map(voterStats.map((v) => [v._id, v.count]));
+    const tenantAdminMap = new Map();
+    for (const ta of tenantAdmins) {
+      if (!tenantAdminMap.has(ta.organizationId)) {
+        tenantAdminMap.set(ta.organizationId, ta);
       }
-      
+    }
+
+    const result = orgs.map((o) => {
+      const uStat = userStatMap.get(o._id);
+      const adminUser = tenantAdminMap.get(o._id);
+      const adminEmail = o.adminEmail || adminUser?.email || '';
+      const initialPassword = o.initialPassword || o.demoPassword || adminUser?.initialPassword || adminUser?.demoPassword || '';
+
       return {
-        id: o._id, name: o.name, modules: o.enabledModules || [],
-        wards: o.allowedWards || [], panchayats: o.panchayats || o.allowedPanchayats || [], isActive: o.isActive, createdAt: o.createdAt,
-        adminCount, activeWorkers, voterCount,
+        id: o._id,
+        name: o.name,
+        modules: o.enabledModules || [],
+        wards: o.allowedWards || [],
+        panchayats: o.panchayats || o.allowedPanchayats || [],
+        isActive: o.isActive,
+        createdAt: o.createdAt,
+        adminCount: uStat?.adminCount || 0,
+        activeWorkers: uStat?.activeWorkers || 0,
+        voterCount: voterCountMap.get(o._id) || 0,
         adminEmail,
         initialPassword,
         whatsappEnabled: o.whatsappEnabled !== false,
@@ -136,10 +191,10 @@ router.get('/organizations', verifyToken, isAdmin, async (_req, res) => {
         slipConfig: o.slipConfig || {},
         district: o.district || '',
         ulbPanchayatSamiti: o.ulbPanchayatSamiti || '',
-        ulbWardGramPanchayat: o.ulbWardGramPanchayat || '',
+        ulbWardGramPanchayat: o.ulbWardGramPanchayat || ''
       };
-    }));
-    
+    });
+
     res.json(result);
   } catch (err) {
     console.error('Organization list failed:', err.message);
@@ -297,6 +352,8 @@ router.put('/organizations/:id', verifyToken, isAdmin, async (req, res) => {
     const org = await Organization.findByIdAndUpdate(req.params.id, updatePayload);
     
     if (!org) return res.status(404).json({ message: 'Organization not found.' });
+    invalidateOrgAuthCache(req.params.id);
+    try { cache.delPrefix('clients_list_'); } catch {}
     res.json({ success: true, message: 'Organization updated.' });
   } catch (err) {
     console.error('Organization update failed:', err.message);
@@ -307,7 +364,10 @@ router.put('/organizations/:id', verifyToken, isAdmin, async (req, res) => {
 // Dedicated endpoints to get and update organization settings (toggles like hidePartNo, etc.)
 router.get('/organizations/:id/settings', verifyToken, async (req, res) => {
   try {
-    const org = await Organization.findById(req.params.id).lean();
+    if (!canAccessOrganization(req, req.params.id)) {
+      return res.status(403).json({ message: 'किसी अन्य संगठन की सेटिंग्स देखने की अनुमति नहीं है।' });
+    }
+    const org = await Organization.findById(req.params.id).select('settings').lean();
     if (!org) return res.status(404).json({ message: 'Organization not found.' });
     res.json(org.settings || { hidePartNo: true });
   } catch (err) {
@@ -320,8 +380,11 @@ router.put('/organizations/:id/settings', verifyToken, async (req, res) => {
     if (req.user.role !== 'admin' && req.user.role !== 'tenant_admin') {
       return res.status(403).json({ message: 'केवल एडमिन ही सेटिंग्स बदल सकते हैं।' });
     }
+    if (!canAccessOrganization(req, req.params.id)) {
+      return res.status(403).json({ message: 'किसी अन्य संगठन की सेटिंग्स बदलने की अनुमति नहीं है।' });
+    }
     const incomingSettings = req.body.settings || req.body;
-    const org = await Organization.findById(req.params.id);
+    const org = await Organization.findById(req.params.id).select('settings').lean();
     if (!org) return res.status(404).json({ message: 'Organization not found.' });
 
     const mergedSettings = {
@@ -334,6 +397,8 @@ router.put('/organizations/:id/settings', verifyToken, async (req, res) => {
       { $set: { settings: mergedSettings } },
       { new: true }
     );
+    invalidateOrgAuthCache(req.params.id);
+    try { cache.delPrefix('clients_list_'); } catch {}
     res.json({ success: true, settings: updated?.settings || mergedSettings, message: 'सेटिंग्स सफलतापूर्वक अपडेट की गईं।' });
   } catch (err) {
     res.status(500).json({ message: 'Could not update organization settings.' });
@@ -617,7 +682,10 @@ router.get('/dashboard-stats', verifyToken, isAdmin, async (req, res) => {
 
 router.get('/organizations/:id/slip-config', verifyToken, async (req, res) => {
   try {
-    const org = await Organization.findById(req.params.id).lean();
+    if (!canAccessOrganization(req, req.params.id)) {
+      return res.status(403).json({ message: 'अन्य संगठन की पर्ची सेटिंग देखने की अनुमति नहीं है।' });
+    }
+    const org = await Organization.findById(req.params.id).select('slipConfig').lean();
     if (!org) return res.status(404).json({ message: 'Organization not found.' });
     res.json(org.slipConfig || {});
   } catch (err) {
@@ -641,28 +709,61 @@ router.put('/organizations/:id/slip-config', verifyToken, async (req, res) => {
       },
       { new: true, upsert: true }
     );
+    try { cache.delPrefix('slip_config_'); } catch {}
     res.json({ success: true, slipConfig: updated?.slipConfig || {} });
   } catch (err) {
     res.status(500).json({ message: 'Could not update slip configuration.' });
   }
 });
 
-// Dedicated fast endpoint to adjust WhatsApp credits
+// Dedicated atomic endpoint to adjust WhatsApp credits safely under concurrent clicks
 router.put('/organizations/:id/whatsapp-credits', verifyToken, isAdmin, async (req, res) => {
   try {
     const { credits, addCredits, enabled } = req.body;
-    const org = await Organization.findById(req.params.id);
-    if (!org) return res.status(404).json({ message: 'Organization not found.' });
+    const updateQuery = { $set: {} };
 
-    const updateOps = {};
-    if (typeof enabled === 'boolean') updateOps.whatsappEnabled = enabled;
-    if (typeof credits === 'number') updateOps.whatsappCredits = Math.max(0, credits);
-    else if (typeof addCredits === 'number') {
-      updateOps.whatsappCredits = Math.max(0, (org.whatsappCredits || 0) + addCredits);
+    if (typeof enabled === 'boolean') {
+      updateQuery.$set.whatsappEnabled = enabled;
     }
 
-    await Organization.updateOne({ _id: req.params.id }, { $set: updateOps });
-    const updated = await Organization.findById(req.params.id).lean();
+    let filter = { _id: req.params.id };
+    if (typeof credits === 'number' && Number.isFinite(credits)) {
+      const normalized = Math.max(0, Math.min(10000000, Math.trunc(credits)));
+      updateQuery.$set.whatsappCredits = normalized;
+    } else if (typeof addCredits === 'number' && Number.isFinite(addCredits)) {
+      const delta = Math.trunc(addCredits);
+      if (Math.abs(delta) > 10000000) {
+        return res.status(400).json({ message: 'क्रेडिट परिवर्तन सीमा से अधिक है।' });
+      }
+      if (delta < 0) {
+        filter.whatsappCredits = { $gte: Math.abs(delta) };
+      }
+      updateQuery.$inc = { whatsappCredits: delta };
+    }
+
+    if (Object.keys(updateQuery.$set).length === 0) {
+      delete updateQuery.$set;
+    }
+
+    if (!updateQuery.$set && !updateQuery.$inc) {
+      const existing = await Organization.findById(req.params.id).lean();
+      if (!existing) return res.status(404).json({ message: 'Organization not found.' });
+      return res.json({
+        success: true,
+        message: 'WhatsApp credits unchanged.',
+        whatsappCredits: existing.whatsappCredits,
+        whatsappEnabled: existing.whatsappEnabled
+      });
+    }
+
+    const updated = await Organization.findOneAndUpdate(filter, updateQuery, { returnDocument: 'after' }).lean();
+    if (!updated) {
+      const exists = await Organization.exists({ _id: req.params.id });
+      if (!exists) return res.status(404).json({ message: 'Organization not found.' });
+      return res.status(409).json({ message: 'पर्याप्त WhatsApp क्रेडिट शेष नहीं हैं।' });
+    }
+
+    invalidateOrgAuthCache(req.params.id);
     res.json({
       success: true,
       message: 'WhatsApp credits updated successfully.',
@@ -1206,14 +1307,15 @@ router.post(
     // 🧠 Data-driven auto-detection: If EPIC column was not matched via headers, inspect first 15 rows
     if (!colMap.epic) {
       const candidateCols = {};
-      const epicPattern = /^[A-Z]{2,4}[\s\/-]?\d{6,8}$|^[A-Z]{2,3}[\s\/-]\d{1,3}[\s\/-]\d{1,3}[\s\/-]\d{3,7}$|^[A-Z0-9]{3}[0-9OIBLSZG]{7}$/i;
+      // Indian EPIC always starts with letters (never pure 10-digit mobile numbers)
+      const epicPattern = /^[A-Z]{2,4}[\s\/-]?\d{6,8}$|^[A-Z]{2,3}[\s\/-]\d{1,3}[\s\/-]\d{1,3}[\s\/-]\d{3,7}$|^[A-Z]{2,3}[A-Z0-9][0-9OIBLSZG]{6,7}$/i;
       const maxCheckRows = Math.min(worksheet.rowCount || 20, 15);
       for (let r = 2; r <= maxCheckRows; r++) {
         const checkRow = worksheet.getRow(r);
         checkRow.eachCell((c, colNum) => {
-          if (colNum === colMap.serialNo) return;
+          if (colNum === colMap.serialNo || colNum === colMap.mobileNo || colNum === colMap.age) return;
           const val = extractCellValue(c);
-          if (val && epicPattern.test(val)) {
+          if (val && !/^\d+$/.test(val) && epicPattern.test(val)) {
             candidateCols[colNum] = (candidateCols[colNum] || 0) + 1;
           }
         });
@@ -1283,14 +1385,14 @@ router.post(
       else if (['other', 'अन्य'].includes(gender.toLowerCase())) gender = 'अन्य';
       else gender = '';
 
-      let rawWard = cellText('wardNo', colMap.wardNo ? null : 0);
+      let rawWard = cellText('wardNo', isMapped ? 0 : 2);
       if (rawWard && (/^(?:RJ\/|[A-Z]{2,4}\d)/i.test(rawWard) || rawWard.length > 15 || (colMap.epic && colMap.wardNo === colMap.epic))) {
         rawWard = '';
       }
       const finalWardNo = rawWard || defaultWardNo || '1';
 
-      let rawPart = cellText('partNo', colMap.partNo ? null : 0);
-      if (rawPart && (/^(?:RJ\/|[A-Z]{2,4}\d)/i.test(rawPart) || rawPart.length > 15 || (colMap.epic && colMap.partNo === colMap.epic))) {
+      let rawPart = cellText('partNo', isMapped ? 0 : 3);
+      if (rawPart && (/^(?:RJ\/|[A-Z]{2,4}\d)/i.test(rawPart) || rawPart.length > 60 || (colMap.epic && colMap.partNo === colMap.epic))) {
         rawPart = '';
       }
       const finalPartNo = rawPart || defaultBoothNo || '1';
@@ -1550,20 +1652,21 @@ router.get('/export-voters', verifyToken, isAdmin, async (req, res) => {
 router.post('/leads', async (req, res) => {
   try {
     const { name, phone, constituency, electionType, notes } = req.body;
-    if (!name || typeof name !== 'string' || !name.trim()) {
-      return res.status(400).json({ message: 'नाम आवश्यक है।' });
+    if (!name || typeof name !== 'string' || !name.trim() || name.trim().length > 120) {
+      return res.status(400).json({ message: 'वैध नाम आवश्यक है (अधिकतम 120 अक्षर)।' });
     }
-    if (!phone || typeof phone !== 'string' || !phone.trim()) {
-      return res.status(400).json({ message: 'मोबाइल नंबर आवश्यक है।' });
+    const cleanDigits = typeof phone === 'string' ? phone.replace(/\D/g, '') : '';
+    if (!phone || typeof phone !== 'string' || cleanDigits.length < 10 || cleanDigits.length > 15) {
+      return res.status(400).json({ message: 'कृपया 10-अंकीय वैध मोबाइल नंबर दर्ज करें।' });
     }
 
     const lead = await Lead.create({
       _id: `lead_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      name: name.trim(),
-      phone: phone.trim(),
-      constituency: (constituency || '').trim(),
-      electionType: (electionType || 'विधानसभा (Assembly)').trim(),
-      notes: (notes || '').trim(),
+      name: name.trim().slice(0, 120),
+      phone: phone.trim().slice(0, 20),
+      constituency: String(constituency || '').trim().slice(0, 120),
+      electionType: String(electionType || 'विधानसभा (Assembly)').trim().slice(0, 80),
+      notes: String(notes || '').trim().slice(0, 1000),
       status: 'new',
       createdAt: new Date()
     });
@@ -1582,7 +1685,7 @@ router.post('/leads', async (req, res) => {
 // Admin-only: Fetch all website demo leads
 router.get('/leads', verifyToken, isAdmin, async (_req, res) => {
   try {
-    const leads = await Lead.find({}).sort({ createdAt: -1 }).lean();
+    const leads = await Lead.find({}).sort({ createdAt: -1 }).limit(1000).lean();
     res.json(leads);
   } catch (err) {
     console.error('Failed to fetch leads:', err.message);
@@ -1709,13 +1812,13 @@ router.post('/demo-user', verifyToken, isAdmin, async (req, res) => {
         whatsappCredits: 50,
         whatsappUsed: 0,
         slipConfig: {
-          candidateName: 'श्री राजेश कुमार शर्मा',
-          candidateParty: 'भारतीय जनता पार्टी (भाजपा)',
-          assemblyConstituency: 'हवामहल (विधानसभा क्षेत्र)',
+          candidateName: 'डेमो प्रत्याशी (उदाहरण)',
+          candidateParty: 'राजनीतिक दल (उदाहरण)',
+          assemblyConstituency: 'निर्वाचन क्षेत्र (डेमो)',
           wardNumber: 'वार्ड 1',
-          pollingDate: '25 नवम्बर 2024',
-          appealHeadline: '(1 नंबर पर कमल का फूल का बटन दबाएं)',
-          footerAppeal: 'कमल का बटन दबाएं और भारी मतों से विजयी बनाएं'
+          pollingDate: 'मतदान दिवस',
+          appealHeadline: '(मतदान जागरूकता संदेश)',
+          footerAppeal: 'मतदान अवश्य करें'
         }
       });
     }
@@ -1726,7 +1829,7 @@ router.post('/demo-user', verifyToken, isAdmin, async (req, res) => {
       email,
       passwordHash,
       fullName: name,
-      phone: '9876543210',
+      phone: '',
       role: 'tenant_admin',
       organizationId: orgId,
       isActive: true,
@@ -1851,6 +1954,7 @@ router.put('/demo-users/:id/toggle-suspend', verifyToken, isAdmin, async (req, r
     const targetStatus = org.isActive === false; // If currently false, toggle to true; else false
     await Organization.updateOne({ _id: id }, { $set: { isActive: targetStatus } });
     await User.updateMany({ organizationId: id }, { $set: { isActive: targetStatus } });
+    invalidateOrgAuthCache(id);
 
     res.json({
       success: true,
@@ -1983,6 +2087,9 @@ router.put('/wards/rename', verifyToken, isAdmin, async (req, res) => {
 // Dedicated endpoints to get and update custom castes for an organization (backward compatibility)
 router.get('/organizations/:id/custom-castes', verifyToken, async (req, res) => {
   try {
+    if (!canAccessOrganization(req, req.params.id)) {
+      return res.status(403).json({ message: 'किसी अन्य संगठन की जाति सूची देखने की अनुमति नहीं है।' });
+    }
     const org = await Organization.findById(req.params.id).lean();
     if (!org) return res.status(404).json({ message: 'Organization not found.' });
     const castes = org.casteOptions || org.customCastes || org.settings?.customCastes || [];
@@ -2003,18 +2110,22 @@ router.put('/organizations/:id/custom-castes', verifyToken, async (req, res) => 
     if (req.user.role !== 'admin' && req.user.role !== 'tenant_admin') {
       return res.status(403).json({ message: 'केवल एडमिन ही जाति सूची बदल सकते हैं।' });
     }
+    if (!canAccessOrganization(req, req.params.id)) {
+      return res.status(403).json({ message: 'किसी अन्य संगठन की जाति सूची बदलने की अनुमति नहीं है।' });
+    }
     const incomingCastes = req.body.customCastes || req.body.casteOptions;
     if (!Array.isArray(incomingCastes)) {
       return res.status(400).json({ message: 'कस्टम जाति सूची एक array होनी चाहिए।' });
     }
-    const cleaned = incomingCastes.map((c) => String(c).trim()).filter(Boolean);
+    const cleaned = incomingCastes.slice(0, 500).map((c) => String(c).trim()).filter(Boolean);
     const org = await Organization.findById(req.params.id);
     if (!org) return res.status(404).json({ message: 'Organization not found.' });
 
     org.customCastes = cleaned;
     org.casteOptions = cleaned;
     await org.save();
-    try { cache.flushAll?.(); } catch {}
+    invalidateOrgAuthCache(req.params.id);
+    try { cache.delPrefix('voters_'); } catch {}
 
     res.json({
       success: true,
@@ -2025,6 +2136,93 @@ router.put('/organizations/:id/custom-castes', verifyToken, async (req, res) => 
   } catch (err) {
     res.status(500).json({ message: 'Could not update custom castes.' });
   }
+});
+
+// ==========================================
+// DATABASE BACKUP & DISASTER RECOVERY (SuperAdmin Only)
+// ==========================================
+
+router.get('/backups', verifyToken, isAdmin, async (_req, res) => {
+  try {
+    res.json({ success: true, backups: listBackups() });
+  } catch (err) {
+    res.status(500).json({ message: 'बैकअप सूची लोड नहीं हो सकी।' });
+  }
+});
+
+router.post('/backups', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const label = typeof req.body?.label === 'string' ? req.body.label : 'manual';
+    const meta = await createDatabaseBackup({
+      label,
+      triggeredBy: req.user?.email || req.user?.id || 'admin'
+    });
+    res.status(201).json({ success: true, backup: meta });
+  } catch (err) {
+    console.error('Manual DB backup failed:', err.message);
+    res.status(500).json({ message: 'डेटाबेस बैकअप नहीं बन सका।' });
+  }
+});
+
+router.get('/backups/:filename/download', verifyToken, isAdmin, (req, res) => {
+  const filePath = getBackupFilePath(req.params.filename);
+  if (!filePath || !require('fs').existsSync(filePath)) {
+    return res.status(404).json({ message: 'बैकअप फ़ाइल नहीं मिली।' });
+  }
+  return res.download(filePath);
+});
+
+router.post('/backups/:filename/verify', verifyToken, isAdmin, (req, res) => {
+  try {
+    const result = verifyBackupIntegrity(req.params.filename);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ ok: false, message: err.message });
+  }
+});
+
+router.post('/backups/:filename/restore', verifyToken, isAdmin, async (req, res) => {
+  try {
+    if (req.body?.confirm !== 'RESTORE_CONFIRMED') {
+      return res.status(400).json({ message: 'रिस्टोर पुष्टि (confirm: RESTORE_CONFIRMED) आवश्यक है।' });
+    }
+    const result = await restoreDatabaseBackup(req.params.filename, {
+      clearExisting: req.body?.clearExisting === true
+    });
+    try { cache.flushAll?.(); } catch {}
+    res.json(result);
+  } catch (err) {
+    console.error('DB restore failed:', err.message);
+    res.status(400).json({ ok: false, message: err.message });
+  }
+});
+
+// ==========================================
+// ERROR TELEMETRY & OUTBOUND CIRCUIT STATUS
+// ==========================================
+router.get('/errors', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const includeResolved = req.query.includeResolved === 'true';
+    const limit = Number.parseInt(req.query.limit, 10) || 50;
+    const errors = await listRecentErrors({ limit, includeResolved });
+    res.json({ errors });
+  } catch (err) {
+    res.status(500).json({ message: 'त्रुटि लॉग लोड नहीं हो सके।' });
+  }
+});
+
+router.patch('/errors/:id/resolve', verifyToken, isAdmin, async (req, res) => {
+  try {
+    const updated = await resolveTrackedError(req.params.id);
+    if (!updated) return res.status(404).json({ message: 'Error entry not found.' });
+    res.json({ success: true, error: updated });
+  } catch (err) {
+    res.status(500).json({ message: 'त्रुटि स्थिति अपडेट नहीं हो सकी।' });
+  }
+});
+
+router.get('/outbound-status', verifyToken, isAdmin, (_req, res) => {
+  res.json({ providers: getOutboundHealthSnapshot() });
 });
 
 module.exports = router;

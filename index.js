@@ -1,174 +1,113 @@
-// Top-level Process Crash Prevention (Guarantees zero silent terminations)
-process.on('uncaughtException', (err) => {
-  console.error('💥 [CRITICAL] Uncaught Exception:', err.message, err.stack);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('💥 [CRITICAL] Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
 const express = require('express');
 const dotenv = require('dotenv');
-const helmet = require('helmet'); // Security Headers & CSP
-let compression = null;
-try {
-  compression = require('compression'); // Gzip / Deflate Compression for 10x faster payloads
-} catch (err) {
-  console.log('ℹ️ [Server] compression package not installed; running without response compression.');
-}
-const logger = require('./lib/logger'); // Structured Logging
+const compression = require('compression');
+const path = require('path');
+const cron = require('node-cron');
+const mongoose = require('mongoose');
+
+dotenv.config({ path: path.resolve(__dirname, '.env') });
+
+const logger = require('./lib/logger');
 const { sanitizeInput } = require('./middleware/sanitizeMiddleware');
-
-dotenv.config();
-
+const {
+  getClientIp,
+  ipBlockMiddleware,
+  createCorsMiddleware,
+  createHelmetMiddleware,
+  apiLimiter,
+  authLimiter,
+  publicLeadLimiter,
+  uploadLimiter,
+  heavyReadLimiter,
+  mutationLimiter,
+  globalErrorHandler,
+  getSecurityStats
+} = require('./middleware/securityMiddleware');
+const { idempotencyMiddleware } = require('./middleware/idempotencyMiddleware');
 const db = require('./db');
-// Route imports
+
 const authRoutes = require('./routes/auth');
 const voterRoutes = require('./routes/voters');
 const whatsappRoutes = require('./routes/whatsapp');
 const adminRoutes = require('./routes/admin');
 const userRoutes = require('./routes/users');
 const featureRoutes = require('./routes/features');
+const adminPdfRoutes = require('./routes/admin_pdf');
+const rbacRoutes = require('./routes/rbac');
+const { captureException } = require('./lib/errorTracker');
+const { toUtcIso, DEFAULT_TIMEZONE } = require('./lib/dateUtils');
 
 const app = express();
-app.set('trust proxy', true);
 const PORT = process.env.PORT || 5002;
 
-// Dynamic & Configurable IP Blocking Middleware
-const blockedIPs = new Set(
-  (process.env.BLOCKED_IPS || '')
-    .split(',')
-    .map(ip => ip.trim())
-    .filter(Boolean)
-);
+// Trust single edge proxy hop (Vercel/Render/Nginx/Cloudflare) safely for accurate rate limiting
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
 
-// In-memory violation tracker for automatic threat mitigation
-const ipViolationTracker = new Map();
+// 1. Permissive CORS first so preflights and error responses always succeed cleanly
+app.use(createCorsMiddleware());
 
-function ipBlockMiddleware(req, res, next) {
-  const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || req.ip;
-  if (clientIp && blockedIPs.has(clientIp)) {
-    return res.status(403).json({
-      message: 'सुरक्षा नीति के उल्लंघन के कारण आपका IP पता अवरुद्ध (Blocked) है।'
-    });
+// 2. HTTP Security Headers
+app.use(createHelmetMiddleware());
+
+// 3. Fast Gzip/Brotli Compression
+app.use(compression({
+  level: 6,
+  threshold: 1024,
+  filter: (req, res) => {
+    if (req.headers['x-no-compression']) return false;
+    return compression.filter(req, res);
   }
-
-  // Reject automated vulnerability scanner probes (.env, wp-login, etc.)
-  const rawUrl = (req.originalUrl || req.url || '').toLowerCase();
-  if (rawUrl.includes('/.env') || rawUrl.includes('/wp-login') || rawUrl.includes('/phpmyadmin') || rawUrl.includes('eval-stdin')) {
-    if (clientIp) {
-      const violations = (ipViolationTracker.get(clientIp) || 0) + 1;
-      ipViolationTracker.set(clientIp, violations);
-      if (violations > 5) {
-        blockedIPs.add(clientIp);
-        console.warn(`[Security] IP ${clientIp} auto-blocked due to repeated exploit probing.`);
-      }
-    }
-    return res.status(403).json({ message: 'अवैध अनुरोध (Forbidden).' });
-  }
-
-  next();
-}
-
-app.use(ipBlockMiddleware);
-
-// High-Throughput Rate Limiters
-const rateLimit = require('express-rate-limit');
-
-// 1. General API Rate Limiter (2500 req/min - high headroom for ground workers sharing same hotspot)
-const apiLimiter = rateLimit({
-  windowMs: 1 * 60 * 1000,
-  max: 2500,
-  message: { message: 'Too many requests from this IP, please try again after a minute' },
-  standardHeaders: true,
-  legacyHeaders: false,
-  validate: { trustProxy: false },
-});
-
-// 2. Strict Authentication Rate Limiter (Prevents brute force on login)
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes window
-  max: 40, // 40 attempts per 15 min per IP
-  message: { message: 'बहुत अधिक लॉगिन प्रयास (Too many login attempts). कृपया 15 मिनट बाद पुनः प्रयास करें।' },
-  standardHeaders: true,
-  legacyHeaders: false,
-  validate: { trustProxy: false },
-});
-
-// 3. Upload Rate Limiter (Allows batch sequential uploads while protecting from flood attacks)
-const uploadLimiter = rateLimit({
-  windowMs: 1 * 60 * 1000,
-  max: 120, // Allows up to 120 files per minute for sequential multi-PDF uploads
-  message: { error: 'फाइल अपलोड की सीमा पार हो गई है। कृपया 1 मिनट बाद पुनः प्रयास करें।' },
-  standardHeaders: true,
-  legacyHeaders: false,
-  validate: { trustProxy: false },
-});
-
-const path = require('path');
-
-// Universal Open CORS Middleware (Zero CORS blocking on any route, method, origin, or custom headers)
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-  res.header('Access-Control-Allow-Headers', '*');
-  res.header('Access-Control-Expose-Headers', '*');
-  res.header('Access-Control-Max-Age', '86400'); // Cache preflight for 24 hours to reduce server load
-  if (req.method === 'OPTIONS') {
-    return res.status(204).end();
-  }
-  next();
-});
-
-// Security & Performance Middlewares
-app.use(helmet({
-  crossOriginResourcePolicy: { policy: 'cross-origin' },
-  crossOriginOpenerPolicy: false,
 }));
 
-// High-speed payload compression (shrinks JSON payloads by up to 90% when module is available)
-if (compression) {
-  app.use(compression({
-    threshold: 1024, // compress responses above 1KB
-    filter: (req, res) => {
-      if (req.headers['x-no-compression']) return false;
-      return compression.filter(req, res);
+// 4. Bounded IP Block & Exploit Scanner Protection
+app.use(ipBlockMiddleware);
+
+// 5. Payload Parsers (Strict limits to mitigate RAM DoS while supporting slip previews & bulk edits)
+// Capture rawBuffer on Meta webhook route so HMAC-SHA256 x-hub-signature-256 verification stays exact
+app.use(express.json({
+  limit: '15mb',
+  verify: (req, _res, buf) => {
+    if (req.originalUrl && req.originalUrl.startsWith('/api/whatsapp/webhook')) {
+      req.rawBody = buf;
     }
-  }));
-}
+  }
+}));
+app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
-app.use(express.json({ limit: '25mb' }));
-app.use(express.urlencoded({ extended: true, limit: '25mb' }));
-
-// Input sanitization (strips NoSQL injection, prototype pollution, cleans dirty strings)
+// 6. Anti-NoSQL-Injection, Null-Byte, Depth & Prototype Pollution Guard
 app.use(sanitizeInput);
 
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-app.use(express.static(path.join(__dirname, 'public')));
+// Static files cleanly scoped without permissive dotfiles exposure
+app.use('/uploads', express.static(path.join(__dirname, 'uploads'), { dotfiles: 'ignore', maxAge: '1d' }));
+app.use(express.static(path.join(__dirname, 'public'), { index: false, dotfiles: 'ignore', maxAge: '1d' }));
 
-// Health checks placed before rate limiters so monitoring probes never get rate limited
-app.get(['/health', '/api/health'], async (_req, res) => {
+// Health check
+app.get('/api/health', async (_req, res) => {
   try {
-    const mongoose = require('mongoose');
-    if (mongoose.connection.readyState === 1) {
-      res.json({ status: 'ok', database: 'connected', timestamp: new Date().toISOString() });
-    } else {
-      res.status(503).json({ status: 'degraded', database: 'unavailable' });
-    }
+    const dbState = mongoose.connection.readyState === 1 ? 'connected' : 'connecting_or_down';
+    res.json({
+      status: dbState === 'connected' ? 'ok' : 'degraded',
+      database: dbState,
+      uptimeSec: Math.round(process.uptime()),
+      security: getSecurityStats(),
+      timestamp: new Date().toISOString()
+    });
   } catch (err) {
-    console.error('Health check failed:', err.message);
+    logger.error('Health check failed', { message: err.message });
     res.status(503).json({ status: 'degraded', database: 'error' });
   }
 });
 
+// Legal Policy Routes
 app.get(['/privacy', '/privacy.html'], (_req, res) => res.sendFile(path.join(__dirname, 'public', 'privacy.html')));
 app.get(['/terms', '/terms.html'], (_req, res) => res.sendFile(path.join(__dirname, 'public', 'terms.html')));
 app.get(['/refund', '/refund.html'], (_req, res) => res.sendFile(path.join(__dirname, 'public', 'refund.html')));
 app.get(['/contact', '/contact.html'], (_req, res) => res.sendFile(path.join(__dirname, 'public', 'contact.html')));
 
-app.get('/api/legal/policies', (_req, res) => {
-  const host = _req.get('host') || 'localhost:5003';
-  const proto = _req.protocol || 'http';
+app.get('/api/legal/policies', (req, res) => {
+  const host = req.get('host') || 'localhost:5002';
+  const proto = req.protocol || 'http';
   res.json({
     platform: 'VijaySetu (विजयसेतु)',
     version: '2026.1',
@@ -190,61 +129,128 @@ app.get('/api/legal/policies', (_req, res) => {
   });
 });
 
-// Apply rate limiter to all API routes
+// 7. Tiered Rate Limiting & Concurrency Idempotency Protection
 app.use('/api', apiLimiter);
-
-// Specific Auth Limiter
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
-
-// Specific Upload Limiter
+app.use('/api/admin/leads', publicLeadLimiter);
 app.use('/api/admin/pdf/upload', uploadLimiter);
+app.use('/api/admin/upload-voters', uploadLimiter);
+app.use('/api/voters/all', heavyReadLimiter);
+app.use('/api/features/export.xlsx', heavyReadLimiter);
+app.use('/api/admin/export-voters', heavyReadLimiter);
+app.use('/api/whatsapp/send-slip', mutationLimiter);
+app.use('/api/whatsapp/send-manual', mutationLimiter);
+app.use('/api/whatsapp/campaign/send', mutationLimiter);
 
-// Request Logging Middleware
-app.use((req, res, next) => {
-  logger.info(`Incoming Request: ${req.method} ${req.url}`, { ip: req.ip });
+// Attach Idempotency-Key replay/in-flight shield for API mutations
+app.use('/api', (req, res, next) => {
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    return idempotencyMiddleware()(req, res, next);
+  }
+  return next();
+});
+
+// Structured Request Logging
+app.use((req, _res, next) => {
+  if (process.env.NODE_ENV !== 'test') {
+    logger.info(`Incoming Request: ${req.method} ${req.url}`, { ip: getClientIp(req) });
+  }
   next();
 });
 
-// Routes
+// API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/voters', voterRoutes);
 app.use('/api/whatsapp', whatsappRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/features', featureRoutes.router);
-app.use('/api/admin/pdf', require('./routes/admin_pdf'));
+app.use('/api/admin/pdf', adminPdfRoutes);
+app.use('/api/rbac', rbacRoutes);
 
-app.get('/', (req, res) => {
+app.get('/api/meta/version', (_req, res) => {
+  res.json({
+    apiVersion: '2026.1',
+    minSupportedClientVersion: '2026.1',
+    serverUtc: toUtcIso(),
+    defaultTimeZone: DEFAULT_TIMEZONE,
+    stateless: true,
+  });
+});
+
+app.get('/', (_req, res) => {
   res.send('VijaySetu Electoral Intelligence Backend API is running.');
 });
 
-// Graceful Safe Error Handling (Never leaks stack traces, DB credentials, or internal paths)
-app.use((err, req, res, next) => {
-  logger.error(`Unhandled Exception: ${err.message}`, { stack: err.stack, url: req.url });
-  res.status(err.status || 500).json({
-    message: err.userFacingMessage || 'सर्वर पर अस्थायी समस्या है। कृपया कुछ क्षण बाद पुनः प्रयास करें। (System is experiencing high load)',
-    errorId: Date.now()
-  });
+// Zero-Leak Global Error Handler
+app.use(globalErrorHandler);
+
+// Automated Daily Database Snapshot Cron (03:00 AM IST, skipped during test runs or when replica sets ENABLE_AUTO_BACKUP=false)
+let backupCronJob = null;
+if (process.env.NODE_ENV !== 'test' && process.env.ENABLE_AUTO_BACKUP !== 'false' && require.main === module) {
+  const { createDatabaseBackup } = require('./lib/backupService');
+  backupCronJob = cron.schedule(
+    '0 3 * * *',
+    async () => {
+      try {
+        if (mongoose.connection.readyState === 1) {
+          await createDatabaseBackup({ label: 'daily-cron', triggeredBy: 'cron' });
+        }
+      } catch (err) {
+        captureException(err, { path: 'cron:daily-backup' });
+        logger.error('Automated daily DB backup failed', { message: err.message });
+      }
+    },
+    { timezone: 'Asia/Kolkata' }
+  );
+}
+
+process.on('unhandledRejection', (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  const id = captureException(err, { path: 'process:unhandledRejection' });
+  logger.error(`Unhandled Rejection [${id}]`, { message: err.message });
 });
 
 const startServer = () => {
   const server = app.listen(PORT, () => {
     logger.info(`Server is running on port ${PORT}`);
   });
-  // High-concurrency socket resilience (prevents 502/socket hangs behind proxies under 100+ concurrent users)
   server.keepAliveTimeout = 65000;
   server.headersTimeout = 66000;
   server.requestTimeout = 30000;
   return server;
 };
 
+// Graceful shutdown so active DB writes/backups finish cleanly before exit
+function setupGracefulShutdown(server) {
+  const shutdown = async (signal) => {
+    logger.info(`Received ${signal}, shutting down cleanly...`);
+    if (backupCronJob) backupCronJob.stop();
+    if (server) {
+      server.close(async () => {
+        await db.stopDB();
+        process.exit(0);
+      });
+      setTimeout(() => process.exit(1), 10000).unref();
+    } else {
+      await db.stopDB();
+      process.exit(0);
+    }
+  };
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  process.once('SIGINT', () => shutdown('SIGINT'));
+}
+
 if (require.main === module) {
   db.connectDB()
-    .then(() => startServer())
+    .then(() => {
+      const server = startServer();
+      setupGracefulShutdown(server);
+    })
     .catch((err) => {
       logger.error('Database startup failed', { message: err.message });
-      process.exitCode = 1;
+      process.exit(1);
     });
 }
 

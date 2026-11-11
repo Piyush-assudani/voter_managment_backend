@@ -9,7 +9,7 @@ const cron = require('node-cron');
 const { Voter } = require('../models');
 const { fixCorruptedHindi } = require('../lib/hindiDictionary');
 const { safeRegex } = require('../lib/regexUtils');
-const { verifyToken, isAdmin } = require('../middleware/authMiddleware');
+const { verifyToken, isAdmin, invalidateOrgAuthCache } = require('../middleware/authMiddleware');
 
 const uploadDir = path.join(__dirname, '../uploads');
 if (!fs.existsSync(uploadDir)) {
@@ -18,7 +18,10 @@ if (!fs.existsSync(uploadDir)) {
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
+  filename: (req, file, cb) => {
+    const base = path.basename(file.originalname || 'upload.pdf').replace(/[^a-zA-Z0-9._\-\u0900-\u097F ]/g, '_');
+    cb(null, `${Date.now()}-${base}`);
+  }
 });
 const upload = multer({ 
   storage,
@@ -28,29 +31,31 @@ const upload = multer({
 const pdfQueue = require('../lib/pdfQueue');
 
 // Task 4: STRICT AUTOMATED CLEANUP (2-Hour Deletion for PDF files)
-cron.schedule('0 * * * *', () => {
-  console.log('Running PDF cleanup cron job...');
-  fs.readdir(uploadDir, (err, files) => {
-    if (err) return console.error('Cleanup error:', err);
-    files.forEach(file => {
-      if (file.endsWith('.pdf')) {
-        const filePath = path.join(uploadDir, file);
-        fs.stat(filePath, (err, stats) => {
-          if (!err) {
-            const now = new Date().getTime();
-            // Exactly 2 hours TTL
-            const endTime = new Date(stats.birthtime).getTime() + (2 * 60 * 60 * 1000);
-            if (now > endTime) {
-              fs.unlink(filePath, err => {
-                if (!err) console.log(`Deleted expired PDF: ${file}`);
-              });
+if (process.env.NODE_ENV !== 'test') {
+  cron.schedule('0 * * * *', () => {
+    console.log('Running PDF cleanup cron job...');
+    fs.readdir(uploadDir, (err, files) => {
+      if (err) return console.error('Cleanup error:', err);
+      files.forEach(file => {
+        if (file.endsWith('.pdf')) {
+          const filePath = path.join(uploadDir, file);
+          fs.stat(filePath, (err, stats) => {
+            if (!err) {
+              const now = new Date().getTime();
+              // Exactly 2 hours TTL
+              const endTime = new Date(stats.birthtime).getTime() + (2 * 60 * 60 * 1000);
+              if (now > endTime) {
+                fs.unlink(filePath, err => {
+                  if (!err) console.log(`Deleted expired PDF: ${file}`);
+                });
+              }
             }
-          }
-        });
-      }
+          });
+        }
+      });
     });
   });
-});
+}
 
 // GET /jobs - to fetch recent upload jobs (SuperAdmin Only)
 router.get('/jobs', verifyToken, isAdmin, (req, res) => {
@@ -127,14 +132,37 @@ router.post('/upload', verifyToken, isAdmin, (req, res, next) => {
 
       if (isZip) {
         try {
+          const MAX_ZIP_FILES = 50;
+          const MAX_SINGLE_PDF_BYTES = 50 * 1024 * 1024;
+          const MAX_TOTAL_ZIP_BYTES = 250 * 1024 * 1024;
+          let extractedCount = 0;
+          let extractedBytes = 0;
+
           const directory = await unzipper.Open.file(f.path);
           for (const entry of directory.files) {
-            const entryName = entry.path;
-            const isEntryPdf = entryName.toLowerCase().endsWith('.pdf') && !entryName.startsWith('__MACOSX') && !entryName.includes('/.');
+            if (extractedCount >= MAX_ZIP_FILES) {
+              console.warn(`[AdminPdf] ZIP entry cap (${MAX_ZIP_FILES}) reached, skipping remaining entries.`);
+              break;
+            }
+            const entryName = entry.path || '';
+            const isEntryPdf = entryName.toLowerCase().endsWith('.pdf') && !entryName.startsWith('__MACOSX') && !entryName.includes('/.') && !entryName.includes('..');
             if (isEntryPdf) {
-              const baseName = path.basename(entryName);
+              const declaredSize = entry.vars?.uncompressedSize || 0;
+              if (declaredSize > MAX_SINGLE_PDF_BYTES || extractedBytes + declaredSize > MAX_TOTAL_ZIP_BYTES) {
+                continue;
+              }
+              const baseName = path.basename(entryName).replace(/[^a-zA-Z0-9._\-\u0900-\u097F ]/g, '_');
               const extractedPath = path.join(uploadDir, `${Date.now()}-${baseName}`);
               const buffer = await entry.buffer();
+              if (buffer.length > MAX_SINGLE_PDF_BYTES || extractedBytes + buffer.length > MAX_TOTAL_ZIP_BYTES) {
+                continue;
+              }
+              // Verify %PDF- magic header
+              if (buffer.length < 5 || buffer.subarray(0, 5).toString('ascii') !== '%PDF-') {
+                continue;
+              }
+              extractedCount += 1;
+              extractedBytes += buffer.length;
               fs.writeFileSync(extractedPath, buffer);
               const key = `${baseName.toLowerCase().trim()}_${buffer.length}`;
               if (!seenFiles.has(key)) {
@@ -150,11 +178,14 @@ router.post('/upload', verifyToken, isAdmin, (req, res, next) => {
           try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch {}
         } catch (zipErr) {
           console.error('[AdminPdf] Error extracting zip file:', zipErr.message);
+          try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch {}
         }
       } else if (isPdf) {
-        const key = `${f.originalname.toLowerCase().trim()}_${f.size}`;
+        const cleanOrig = path.basename(f.originalname || 'upload.pdf');
+        const key = `${cleanOrig.toLowerCase().trim()}_${f.size}`;
         if (!seenFiles.has(key)) {
           seenFiles.add(key);
+          f.originalname = cleanOrig;
           pdfFiles.push(f);
         } else {
           try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch {}
@@ -254,6 +285,7 @@ router.post('/upload', verifyToken, isAdmin, (req, res, next) => {
               { _id: organizationId },
               { $addToSet: updateObj }
             );
+            invalidateOrgAuthCache(organizationId);
           }
         } catch (orgErr) {
           console.warn('Could not update organization wards/panchayats:', orgErr.message);
