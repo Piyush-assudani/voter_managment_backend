@@ -163,6 +163,8 @@ exports.getClients = async (req, res) => {
         voterCount: voterCountMap[o._id] || 0,
         settings: o.settings || { hidePartNo: true },
         customCastes: o.customCastes || o.settings?.customCastes || [],
+        panchayats: o.panchayats || o.allowedPanchayats || [],
+        wards: o.wards || o.allowedWards || [],
       }));
       cache.set(cacheKey, responseData, 30);
       return res.json(responseData);
@@ -180,6 +182,8 @@ exports.getClients = async (req, res) => {
           voterCount,
           settings: org.settings || { hidePartNo: true },
           customCastes: org.customCastes || org.settings?.customCastes || [],
+          panchayats: org.panchayats || org.allowedPanchayats || [],
+          wards: org.wards || org.allowedWards || [],
         },
       ];
       cache.set(cacheKey, responseData, 30);

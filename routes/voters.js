@@ -443,9 +443,12 @@ router.get('/panchayats-summary', verifyToken, requireModule('voters', 'communit
 router.get('/issues-summary', verifyToken, requireModule('voters'), async (req, res) => {
   try {
     const query = addVoterAccess(req);
-    const ward = req.query.ward;
+    const { ward, panchayat } = req.query;
     if (typeof ward === 'string' && ward.trim()) {
       applyWardFilter(query, ward);
+    }
+    if (typeof panchayat === 'string' && panchayat.trim()) {
+      applyPanchayatFilter(query, panchayat.trim());
     }
 
     const [totalVoters, missingEpicCount, missingHouseCount, deletedCount, missingPhoneCount] = await Promise.all([
@@ -919,6 +922,11 @@ router.get('/family/:houseNo', verifyToken, requireModule('voters', 'community')
 
     if (typeof requestedWard === 'string' && requestedWard.trim()) {
       applyWardFilter(query, requestedWard.trim());
+    }
+
+    const requestedPanchayat = req.query.panchayat;
+    if (typeof requestedPanchayat === 'string' && requestedPanchayat.trim()) {
+      applyPanchayatFilter(query, requestedPanchayat.trim());
     }
 
     const requestedPart = req.query.part || req.query.partNo;

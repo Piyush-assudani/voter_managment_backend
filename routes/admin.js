@@ -126,7 +126,7 @@ router.get('/organizations', verifyToken, isAdmin, async (_req, res) => {
       
       return {
         id: o._id, name: o.name, modules: o.enabledModules || [],
-        wards: o.allowedWards || [], isActive: o.isActive, createdAt: o.createdAt,
+        wards: o.allowedWards || [], panchayats: o.panchayats || o.allowedPanchayats || [], isActive: o.isActive, createdAt: o.createdAt,
         adminCount, activeWorkers, voterCount,
         adminEmail,
         initialPassword,
@@ -1108,6 +1108,7 @@ router.post(
   }
 
   const defaultWardNo = typeof req.body.wardNo === 'string' ? req.body.wardNo.trim() : '';
+  const defaultPanchayat = typeof req.body.panchayat === 'string' ? req.body.panchayat.trim() : '';
   const defaultBoothNo = typeof req.body.boothNo === 'string' ? req.body.boothNo.trim() : '';
   const defaultUploadedBy = typeof req.body.uploadedBy === 'string' ? req.body.uploadedBy.trim() : '';
   const defaultDescription = typeof req.body.listDescription === 'string' ? req.body.listDescription.trim() : '';
@@ -1181,6 +1182,8 @@ router.post(
         colMap.age = colNumber;
       } else if (/^(लिंग|gender|sex|जेंडर)$/i.test(h)) {
         colMap.gender = colNumber;
+      } else if (/^(ग्रामपंचायत|पंचायत|panchayat|grampanchayat)$/i.test(h) || h.startsWith('panchayat') || h.startsWith('पंचायत')) {
+        colMap.panchayat = colNumber;
       } else if (/^(वार्ड|ward|wardno|वार्डसंख्या)$/i.test(h) || h.startsWith('ward') || h.startsWith('वार्ड')) {
         colMap.wardNo = colNumber;
       } else if (/^(बूथ|भाग|part|booth|partno|boothno|भागसंख्या|बूथसंख्या)$/i.test(h) || h.startsWith('part') || h.startsWith('booth') || h.includes('भागसंख्या')) {
@@ -1311,6 +1314,8 @@ router.post(
         familyId: cellText('familyId', 16) || '',
         villageName: cleanVillageOrSectionName(cellText('villageNameHi', 18) || cellText('villageName', 17) || cellText('villageName', 9) || ''),
         villageNameHi: cleanVillageOrSectionName(cellText('villageNameHi', 18) || cellText('villageName', 17) || cellText('villageName', 9) || ''),
+        panchayat: cellText('panchayat') || defaultPanchayat || '',
+        panchayatHi: cellText('panchayat') || defaultPanchayat || '',
         organizationId,
       };
       if (defaultUploadedBy) {
@@ -1338,7 +1343,17 @@ router.post(
     if (detectedWards.size > 0) {
       await Organization.updateOne(
         { _id: organizationId },
-        { $addToSet: { wards: { $each: Array.from(detectedWards) } } }
+        { $addToSet: { wards: { $each: Array.from(detectedWards) }, allowedWards: { $each: Array.from(detectedWards) } } }
+      ).catch(() => {});
+    }
+
+    const detectedPanchayats = new Set();
+    if (defaultPanchayat) detectedPanchayats.add(defaultPanchayat);
+    batch.forEach(v => { if (v.panchayat) detectedPanchayats.add(v.panchayat); });
+    if (detectedPanchayats.size > 0) {
+      await Organization.updateOne(
+        { _id: organizationId },
+        { $addToSet: { panchayats: { $each: Array.from(detectedPanchayats) }, allowedPanchayats: { $each: Array.from(detectedPanchayats) } } }
       ).catch(() => {});
     }
 
