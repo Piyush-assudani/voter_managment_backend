@@ -1295,7 +1295,9 @@ DEV_CONSONANTS = {
     'ष': 'sh', 'स': 's', 'ह': 'h',
     'क्ष': 'ksh', 'त्र': 'tr', 'ज्ञ': 'gya', 'श्र': 'shr',
     'क़': 'q', 'ख़': 'kh', 'ग़': 'gh', 'ज़': 'z', 'ड़': 'r',
-    'ढ़': 'rh', 'फ़': 'f'
+    'ढ़': 'rh', 'फ़': 'f',
+    '\u0958': 'q', '\u0959': 'kh', '\u095a': 'gh', '\u095b': 'z',
+    '\u095c': 'r', '\u095d': 'rh', '\u095e': 'f', '\u095f': 'y'
 }
 
 COMPOUND_NAME_SUFFIXES = [
@@ -1371,6 +1373,7 @@ def transliterate_hindi(text: str) -> str:
         else:
             out.append(transliterate_token(tok))
     res = ''.join(out)
+    res = re.sub(r'[\u0900-\u097F\u25CC]', '', res)
     return re.sub(r'\s+', ' ', res).strip()
 
 KNOWN_SECTION_TRANSLATIONS = {
