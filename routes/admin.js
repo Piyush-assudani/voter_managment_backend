@@ -1780,7 +1780,7 @@ router.post('/demo-user', verifyToken, isAdmin, async (req, res) => {
 
     const email = (customEmail && typeof customEmail === 'string' && customEmail.includes('@'))
       ? customEmail.trim().toLowerCase()
-      : `${defaultPrefix || 'demo'}_${randomCode}@matdataportal.com`;
+      : `${defaultPrefix || 'demo'}_${randomCode}@vijaysetu.com`;
 
     const existingUser = await User.findOne({ email });
     if (existingUser) {

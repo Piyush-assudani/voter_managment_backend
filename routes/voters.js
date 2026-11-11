@@ -878,21 +878,22 @@ router.get('/', verifyToken, requireModule('voters', 'community', 'workers', 'mi
     const isAll = req.query.all === 'true' || req.query.all === '1';
     const page = boundedInteger(req.query.page, 1, 100000);
     const pageSize = boundedInteger(req.query.pageSize, 100, 10000);
-    
-    // Execute count and paginated query in parallel for 2x faster responses
-    const voterQuery = Voter.find(query)
-      .sort({ wardNo: 1, partNo: 1, serialNo: 1 })
-      .lean();
-    if (!isAll) {
-      voterQuery.skip((page - 1) * pageSize).limit(pageSize);
-    } else {
-      voterQuery.limit(10000);
-    }
+    const skipCount = isAll ? 0 : (page - 1) * pageSize;
 
-    const [count, voters] = await Promise.all([
-      Voter.countDocuments(query),
-      voterQuery,
-    ]);
+    const count = await Voter.countDocuments(query);
+    let voters = [];
+    if (count > 0 && (isAll || skipCount < count)) {
+      const voterQuery = Voter.find(query)
+        .sort({ wardNo: 1, partNo: 1, serialNo: 1 })
+        .allowDiskUse(true)
+        .lean();
+      if (!isAll) {
+        voterQuery.skip(skipCount).limit(pageSize);
+      } else {
+        voterQuery.limit(10000);
+      }
+      voters = await voterQuery;
+    }
 
     const formattedVoters = voters.map((v) => ({
       ...v,

@@ -708,7 +708,7 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
       try {
         const components = [];
         // Header Image (IMAGE header for voter slip)
-        const effectiveImageUrl = publicImageUrl || org?.slipConfig?.headerGraphicImage || 'https://images.unsplash.com/photo-1540910419892-4a36d2c3266c?auto=format&fit=crop&w=800&q=80';
+        const effectiveImageUrl = publicImageUrl || org?.slipConfig?.headerGraphicImage || `${getPublicBaseUrl(req)}/logo.webp`;
         if (mediaId || effectiveImageUrl) {
           components.push({
             type: 'header',
@@ -1059,7 +1059,7 @@ ${directPhotoLink}
 • *परिवार में कुल मतदाता:* ${familyCount}
 
 🇮🇳 _मतदान हमारा अधिकार एवं कर्तव्य है। मतदान हेतु पहचान पत्र अवश्य साथ लाएं।_
-*— मतदाता पोर्टल (Matdata Portal) इलेक्शन मैनेजमेंट*`;
+*— VijaySetu (विजयसेतु) इलेक्शन मैनेजमेंट*`;
     } else {
       messageText = `🗳️ *आधिकारिक मतदाता सूचना पर्ची* 🗳️
 
@@ -1078,7 +1078,7 @@ ${relativeName ? `• *${relationType}:* ${relativeName}\n` : ''}• *वार�
 • *आयु / लिंग:* ${ageGender}
 
 🇮🇳 _मतदान हमारा अधिकार एवं कर्तव्य है। कृपया पहचान पत्र (Voter ID/आधार कार्ड) साथ लाएं।_
-*— मतदाता पोर्टल (Matdata Portal) इलेक्शन मैनेजमेंट*`;
+*— VijaySetu (विजयसेतु) इलेक्शन मैनेजमेंट*`;
     }
 
     const waLink = `https://wa.me/${recipientPhone}?text=${encodeURIComponent(messageText)}`;
@@ -1105,6 +1105,30 @@ ${relativeName ? `• *${relationType}:* ${relativeName}\n` : ''}• *वार�
 });
 
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function sanitizeSlipImageUrl(rawUrl, fallbackUrl) {
+  const candidate = String(rawUrl ?? '').trim();
+  if (!candidate) return fallbackUrl;
+  if (candidate.startsWith('/') && !candidate.startsWith('//')) return candidate;
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return parsed.toString();
+    }
+  } catch {
+    // Ignore malformed URL and fall back safely
+  }
+  return fallbackUrl;
+}
+
 // Public HTML page for viewing voter slip with OpenGraph meta tags for WhatsApp rich preview
 router.get('/view/:id', async (req, res) => {
   try {
@@ -1119,27 +1143,30 @@ router.get('/view/:id', async (req, res) => {
     }
 
     const baseUrl = getPublicBaseUrl(req);
-    const imageUrl = dispatch.slipImageUrl || `${baseUrl}/uploads/slips/slip_${dispatch._id}.jpg`;
-    const voterName = dispatch.voterName || 'मतदाता';
-    const epic = dispatch.voterEpic || 'N/A';
+    const defaultImageUrl = `${baseUrl}/uploads/slips/slip_${encodeURIComponent(String(dispatch._id))}.jpg`;
+    const safeImageUrl = escapeHtml(sanitizeSlipImageUrl(dispatch.slipImageUrl, defaultImageUrl));
+    const safeVoterName = escapeHtml(dispatch.voterName || 'मतदाता');
+    const safeEpic = escapeHtml(dispatch.voterEpic || 'N/A');
+    const safeDownloadEpic = escapeHtml(String(dispatch.voterEpic || 'Voter').replace(/[^a-zA-Z0-9_-]/g, '_'));
 
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(`<!DOCTYPE html>
 <html lang="hi">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>डिजिटल मतदाता पर्ची - ${voterName}</title>
-  <meta property="og:title" content="🗳️ आधिकारिक डिजिटल मतदाता पर्ची - ${voterName}" />
-  <meta property="og:description" content="पहचान पत्र (EPIC): ${epic} • आगामी चुनाव हेतु आपकी आधिकारिक डिजिटल मतदाता सूचना पर्ची" />
-  <meta property="og:image" content="${imageUrl}" />
-  <meta property="og:image:secure_url" content="${imageUrl}" />
+  <title>डिजिटल मतदाता पर्ची - ${safeVoterName}</title>
+  <meta property="og:title" content="🗳️ आधिकारिक डिजिटल मतदाता पर्ची - ${safeVoterName}" />
+  <meta property="og:description" content="पहचान पत्र (EPIC): ${safeEpic} • आगामी चुनाव हेतु आपकी आधिकारिक डिजिटल मतदाता सूचना पर्ची" />
+  <meta property="og:image" content="${safeImageUrl}" />
+  <meta property="og:image:secure_url" content="${safeImageUrl}" />
   <meta property="og:image:type" content="image/jpeg" />
   <meta property="og:image:width" content="600" />
   <meta property="og:image:height" content="800" />
   <meta property="og:type" content="article" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="🗳️ डिजिटल मतदाता पर्ची - ${voterName}" />
-  <meta name="twitter:image" content="${imageUrl}" />
+  <meta name="twitter:title" content="🗳️ डिजिटल मतदाता पर्ची - ${safeVoterName}" />
+  <meta name="twitter:image" content="${safeImageUrl}" />
   <style>
     * { box-sizing: border-box; }
     body {
@@ -1212,16 +1239,16 @@ router.get('/view/:id', async (req, res) => {
       🇮🇳 चुनाव आयोग प्रारूप डिजिटल पर्ची
     </div>
     <h1 style="font-size: 20px; margin: 6px 0; color: #ffffff;">
-      ${voterName} की मतदाता पर्ची
+      ${safeVoterName} की मतदाता पर्ची
     </h1>
     <p style="margin: 0; font-size: 13px; color: #94a3b8;">
-      EPIC: <strong style="color: #f1f5f9;">${epic}</strong>
+      EPIC: <strong style="color: #f1f5f9;">${safeEpic}</strong>
     </p>
 
-    <img src="${imageUrl}" alt="मतदाता पर्ची" class="slip-img" />
+    <img src="${safeImageUrl}" alt="मतदाता पर्ची" class="slip-img" />
 
     <div class="btn-group">
-      <a href="${imageUrl}" download="VoterSlip_${epic}.jpg" class="btn btn-download">
+      <a href="${safeImageUrl}" download="VoterSlip_${safeDownloadEpic}.jpg" class="btn btn-download">
         📥 पर्ची डाउनलोड करें (Download Slip)
       </a>
       <button onclick="window.print()" class="btn btn-print">
@@ -1909,7 +1936,7 @@ router.post('/templates/test-send', verifyToken, async (req, res) => {
     const lang = templateLanguage || metaConfig.templateLanguage || 'hi';
 
     // Sample voter slip graphic for live image preview
-    const sampleImageUrl = 'https://images.unsplash.com/photo-1540910419892-4a36d2c3266c?auto=format&fit=crop&w=800&q=80';
+    const sampleImageUrl = `${getPublicBaseUrl(req)}/logo.webp`;
     const isLegacy7Param = tmplName === 'voter_campaign_appeal';
     const sampleBodyParams = isLegacy7Param
       ? [
