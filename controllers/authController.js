@@ -137,8 +137,11 @@ exports.getClients = async (req, res) => {
   try {
     const isPlatformAdmin = req.user.role === 'admin';
     const cacheKey = `clients_list_${isPlatformAdmin ? 'admin' : (req.user.organizationId || 'org')}`;
-    const cached = cache.get(cacheKey);
-    if (cached) return res.json(cached);
+    const noCache = req.headers['cache-control'] === 'no-cache' || req.query.fresh === 'true';
+    if (!noCache) {
+      const cached = cache.get(cacheKey);
+      if (cached) return res.json(cached);
+    }
 
     if (isPlatformAdmin) {
       const orgs = await Organization.find({ isActive: { $ne: false }, _id: { $ne: 'org_default' } }).sort({ name: 1 }).lean();
@@ -161,7 +164,7 @@ exports.getClients = async (req, res) => {
         settings: o.settings || { hidePartNo: true },
         customCastes: o.customCastes || o.settings?.customCastes || [],
       }));
-      cache.set(cacheKey, responseData, 120);
+      cache.set(cacheKey, responseData, 30);
       return res.json(responseData);
     } else {
       const org = await Organization.findById(req.user.organizationId).lean();
@@ -179,7 +182,7 @@ exports.getClients = async (req, res) => {
           customCastes: org.customCastes || org.settings?.customCastes || [],
         },
       ];
-      cache.set(cacheKey, responseData, 120);
+      cache.set(cacheKey, responseData, 30);
       return res.json(responseData);
     }
   } catch (err) {

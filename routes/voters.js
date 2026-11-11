@@ -350,8 +350,12 @@ router.get('/turnout-pending', verifyToken, requireModule('voters', 'poll-desk',
 router.get('/wards-summary', verifyToken, requireModule('voters', 'community', 'poll-desk'), async (req, res) => {
   try {
     const query = addVoterAccess(req);
+    const { panchayat } = req.query;
+    if (typeof panchayat === 'string' && panchayat.trim()) {
+      applyPanchayatFilter(query, panchayat.trim());
+    }
     const orgId = query.organizationId || req.user.organizationId || 'org_default';
-    const cacheKey = `wards_summary_${orgId}_${req.user.id}`;
+    const cacheKey = `wards_summary_${orgId}_${panchayat ? encodeURIComponent(panchayat.trim()) : 'all'}_${req.user.id}`;
     const cached = cache.get(cacheKey);
     if (cached) return res.json(cached);
     const [rawWards, total, familyFacet] = await Promise.all([
@@ -384,7 +388,16 @@ router.get('/wards-summary', verifyToken, requireModule('voters', 'community', '
       ])
     ]);
     const wards = rawWards
-      .filter((w) => w._id !== null && w._id !== undefined && String(w._id).trim() !== '')
+      .filter((w) => {
+        if (w._id === null || w._id === undefined) return false;
+        const str = String(w._id).trim();
+        if (!str || str === '' || str === '-') return false;
+        // Strictly filter out any EPICs, unreadable keys, or long corrupted strings from appearing as wards
+        if (/^RJ\/\d+/i.test(str) || /^[A-Z]{2,4}\d{6,}/i.test(str) || /^(?:VOTER_|UNREADABLE_)/i.test(str) || str.length > 20) {
+          return false;
+        }
+        return true;
+      })
       .sort((a, b) => {
         const numA = parseInt(a._id, 10);
         const numB = parseInt(b._id, 10);

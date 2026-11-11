@@ -389,8 +389,17 @@ const ExcelJS = require('exceljs');
             }
           }
 
-          const rowWard = cellVal(row, 'wardNo', fallbackCol.wardNo) || wardNo || defaultWardNo || '1';
-          const rowBooth = cellVal(row, 'partNo', fallbackCol.partNo) || boothNo || defaultPartNo || '1';
+          let rawRowWard = cellVal(row, 'wardNo', fallbackCol.wardNo);
+          if (rawRowWard && (/^(?:RJ\/|[A-Z]{2,4}\d)/i.test(rawRowWard) || rawRowWard.length > 15 || /[\u0900-\u097F]{4,}/.test(rawRowWard))) {
+            rawRowWard = '';
+          }
+          const rowWard = rawRowWard || wardNo || defaultWardNo || '1';
+
+          let rawRowBooth = cellVal(row, 'partNo', fallbackCol.partNo);
+          if (rawRowBooth && (/^(?:RJ\/|[A-Z]{2,4}\d)/i.test(rawRowBooth) || rawRowBooth.length > 15 || /[\u0900-\u097F]{4,}/.test(rawRowBooth))) {
+            rawRowBooth = '';
+          }
+          const rowBooth = rawRowBooth || boothNo || defaultPartNo || '1';
           const rowPanchayat = cellVal(row, 'panchayat') || panchayat || '';
 
           // STRICT VALIDATION: Check if authentic voter name OR if marked deleted/unreadable

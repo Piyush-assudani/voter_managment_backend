@@ -1280,10 +1280,22 @@ router.post(
       else if (['other', 'अन्य'].includes(gender.toLowerCase())) gender = 'अन्य';
       else gender = '';
 
+      let rawWard = cellText('wardNo', colMap.wardNo ? null : 0);
+      if (rawWard && (/^(?:RJ\/|[A-Z]{2,4}\d)/i.test(rawWard) || rawWard.length > 15 || (colMap.epic && colMap.wardNo === colMap.epic))) {
+        rawWard = '';
+      }
+      const finalWardNo = rawWard || defaultWardNo || '1';
+
+      let rawPart = cellText('partNo', colMap.partNo ? null : 0);
+      if (rawPart && (/^(?:RJ\/|[A-Z]{2,4}\d)/i.test(rawPart) || rawPart.length > 15 || (colMap.epic && colMap.partNo === colMap.epic))) {
+        rawPart = '';
+      }
+      const finalPartNo = rawPart || defaultBoothNo || '1';
+
       const voter = {
         epic,
-        wardNo: cellText('wardNo', 2) || defaultWardNo || '1',
-        partNo: cellText('partNo', 3) || defaultBoothNo || '1',
+        wardNo: finalWardNo,
+        partNo: finalPartNo,
         serialNo,
         nameEn: nameEn || nameHi,
         nameHi,
