@@ -790,20 +790,22 @@ def clean_hindi_name(raw: str) -> str:
     if not raw:
         return ""
     s = str(raw).strip()
-    s = re.sub(r'^(?:मतदाता\s*(?:का|कर|कप)?\s*)?(?:नाम|नरम|नपम)\s*[:ः\-\s]+', '', s)
-    s = re.sub(r'^(?:पिता|पति|माता|अन्य|पनत|नपतर|मरतर|नपतपकपनपम|पनतकपनपम|नपतपकप|पनतकप)\s*(?:का|कर|कप)?\s*(?:नाम|नरम|नपम)?\s*[:ः\-\s]*', '', s)
-    s = re.sub(r'^(?:नपम|नरम|नाम)\s*[:ः\-\s]*', '', s)
-    s = re.sub(r'^(?:नपतपकपनपम|पनतकपनपम|नपतपकप|पनतकप|नपतर|पनत|मरतर)\s*[:ः\-\s]*', '', s)
+    s = re.sub(r'[\u0964\u0965\|_]+', ' ', s)
+    s = re.sub(r'^(?:मतदाता\s*(?:का|कर|कप)?\s*)?(?:नाम|नरम|नपम|ताम|नाभ)\s*[:ः\-=\._\s]+', '', s)
+    s = re.sub(r'^(?:पिता|पति|माता|अन्य|पनत|नपतर|मरतर|नपतपकपनपम|पनतकपनपम|नपतपकप|पनतकप)\s*(?:का|कर|कप)?\s*(?:नाम|नरम|नपम|ताम|नाभ)?\s*[:ः\-=\._\s]*', '', s)
+    s = re.sub(r'^(?:नपम|नरम|ताम|नाभ|नाम)\s*[:ः\-=\._\s]*', '', s)
+    s = re.sub(r'^(?:नपतपकपनपम|पनतकपनपम|नपतपकप|पनतकप|नपतर|पनत|मरतर)\s*[:ः\-=\._\s]*', '', s)
     s = re.sub(r'\b(?:RJ/\d{2}/\d{3}/\d{6}|[A-Z]{2,3}\d{6,7})\b', '', s)
     s = re.sub(r'\b[A-Z]{2,4}\b', '', s)
     s = re.sub(r'[0-9\d«»|“”….,~`!@#$%^&*()_+=\[\]{}?\/\\]', '', s)
-    s = re.sub(r'^[_\-\s;:,|]+', '', s)
-    s = re.sub(r'[_\-\s;:,|]+$', '', s)
+    s = re.sub(r'^[_\-\s;:,|:=]+', '', s)
+    s = re.sub(r'[_\-\s;:,|:=]+$', '', s)
     s = re.sub(r'\s+', ' ', s).strip()
     if not s:
         return ""
     s = descramble_sec_glyphs(s)
     s = fuzzy_lexicon_correct(s)
+    s = re.sub(r'[\u0964\u0965\|_]+', '', s).strip()
     return s.strip()
 
 
@@ -938,16 +940,20 @@ def cross_field_logic_validation(voter_name: str, rel_type: str, raw_gender: str
     # Cross-Field Rule 1: Husband relation ALWAYS implies female voter
     if rel_type == 'पति':
         gender = 'स्त्री'
+    else:
+        tokens = [t for t in re.split(r'\s+', voter_name or '') if t]
+        last_tok = tokens[-1] if tokens else ''
+        first_tok = tokens[0] if tokens else ''
         
-    # Cross-Field Rule 2: Female name indicators
-    female_markers = ['देवी', 'कुमारी', 'बाई', 'बेगम', 'कंवर', 'श्रीमती', 'सुआ', 'मुन्नी', 'पुष्पा', 'सुमित्रा', 'राधा', 'जवरी', 'प्रेरणा', 'कमला', 'गीता']
-    if any(ind in voter_name for ind in female_markers):
-        gender = 'स्त्री'
+        FEMALE_LAST = {'कुमारी', 'देवी', 'बाई', 'कंवर', 'पार्वती', 'बेगम', 'सुआ', 'मुन्नी', 'पुष्पा', 'सुमित्रा', 'राधा', 'जवरी', 'कमला', 'गीता', 'ममता', 'लक्ष्मी', 'संतोष', 'मोहिनी', 'तारा', 'चोथकी', 'सुगणी', 'नोजी', 'चुनी', 'इमरती', 'नवली', 'सीता', 'सुशीला', 'शांति', 'मंजू', 'रेखा', 'आशा', 'पूजा', 'सुमन', 'केसर', 'धापू', 'धापु', 'बबरी', 'सतकी', 'प्यारकी', 'हस्ती', 'रूपा', 'गुलाबी', 'चंदा', 'गौरी', 'ललिता', 'उर्मिला', 'भंवरी', 'सोनू', 'अंजू', 'किरण', 'संगीता', 'कविता', 'शारदा', 'टीकू', 'जसोदा', 'कौशल्या', 'श्रीमती'}
+        MALE_LAST = {'राम', 'सिंह', 'कुमार', 'लाल', 'चन्द', 'चंद', 'नाथ', 'प्रसाद', 'प्रकाश', 'दान', 'मल', 'खां', 'खान', 'दीन', 'दास', 'करण', 'भंवर', 'जीत', 'दीपक', 'दिलीप', 'नरेश', 'सुरेश', 'रमेश', 'महेश', 'राजेश', 'दिनेश', 'मुकेश', 'कल्याण', 'मदन', 'हर्षित', 'लक्ष्मण', 'रणजीत', 'घेवर', 'कालू', 'तेजा', 'वंशा', 'सावला', 'जैसा', 'भेराराम', 'केशाराम'}
         
-    # Cross-Field Rule 3: Male name indicators
-    male_markers = ['सिंह', 'कुमार', 'लाल', 'राम', 'प्रसाद', 'प्रकाश', 'चंद', 'राज']
-    if any(ind in voter_name for ind in male_markers) and rel_type != 'पति' and not any(ind in voter_name for ind in female_markers):
-        gender = 'पुरुष'
+        if last_tok in FEMALE_LAST or any(fem in voter_name for fem in ['देवी', 'कुमारी', 'बाई', 'कंवर', 'श्रीमती']):
+            gender = 'स्त्री'
+        elif last_tok in MALE_LAST:
+            gender = 'पुरुष'
+        elif not gender or gender not in ['पुरुष', 'स्त्री']:
+            gender = 'पुरुष'
 
     # Age Validation
     age = None
