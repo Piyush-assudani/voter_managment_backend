@@ -212,8 +212,13 @@ process.on('unhandledRejection', (reason) => {
   logger.error(`Unhandled Rejection [${id}]`, { message: err.message });
 });
 
+const http = require('node:http');
+const { initSocket, closeSocket } = require('./lib/socket');
+
 const startServer = () => {
-  const server = app.listen(PORT, () => {
+  const httpServer = http.createServer(app);
+  initSocket(httpServer);
+  const server = httpServer.listen(PORT, () => {
     logger.info(`Server is running on port ${PORT}`);
   });
   server.keepAliveTimeout = 65000;
@@ -227,6 +232,7 @@ function setupGracefulShutdown(server) {
   const shutdown = async (signal) => {
     logger.info(`Received ${signal}, shutting down cleanly...`);
     if (backupCronJob) backupCronJob.stop();
+    closeSocket();
     if (server) {
       server.close(async () => {
         await db.stopDB();

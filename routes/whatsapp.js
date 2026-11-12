@@ -9,6 +9,7 @@ const { Voter, SlipDispatch, Organization, CampaignTemplate } = require('../mode
 const { escapeRegex } = require('../lib/regexUtils');
 const { normalizeDevanagariDigits } = require('../lib/phoneUtils');
 const { executeWithResilience } = require('../lib/outboundService');
+const { emitOrgEvent } = require('../lib/socket');
 
 // Guarded Meta Graph API client: exponential backoff, circuit breaker, bounded concurrency & daily cap
 const axios = {
@@ -426,8 +427,9 @@ router.post('/webhook', async (req, res) => {
                 updateData.errorMessage = errorMsg;
               }
 
+              let updatedDispatch = null;
               try {
-                await SlipDispatch.updateOne(
+                updatedDispatch = await SlipDispatch.findOneAndUpdate(
                   { providerMessageId: messageId },
                   {
                     $set: {
@@ -436,14 +438,25 @@ router.post('/webhook', async (req, res) => {
                     }
                   },
                   {
-                    arrayFilters: [{ 'elem.messageId': messageId }]
+                    arrayFilters: [{ 'elem.messageId': messageId }],
+                    returnDocument: 'after',
+                    projection: { organizationId: 1, status: 1, voterId: 1 }
                   }
-                );
+                ).lean();
               } catch (updateErr) {
-                await SlipDispatch.updateOne(
+                updatedDispatch = await SlipDispatch.findOneAndUpdate(
                   { providerMessageId: messageId },
-                  { $set: updateData }
-                ).catch(() => {});
+                  { $set: updateData },
+                  { returnDocument: 'after', projection: { organizationId: 1, status: 1, voterId: 1 } }
+                ).lean().catch(() => null);
+              }
+
+              if (updatedDispatch?.organizationId) {
+                emitOrgEvent(updatedDispatch.organizationId, 'dispatch:updated', {
+                  dispatchId: String(updatedDispatch._id),
+                  status: updatedDispatch.status,
+                  voterId: updatedDispatch.voterId || '',
+                });
               }
               
               console.log(`WhatsApp Status for [${messageId}]: ${status}`);

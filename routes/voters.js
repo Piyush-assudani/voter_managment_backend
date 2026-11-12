@@ -7,6 +7,7 @@ const { addVoterAccess, getEffectiveOrgId } = require('../lib/access');
 const { escapeRegex, safeRegex, latinToDevanagariRegex } = require('../lib/regexUtils');
 const { normalizeDevanagariDigits } = require('../lib/phoneUtils');
 const { Voter, User, Organization, SystemSetting } = require('../models/index');
+const { emitOrgEvent } = require('../lib/socket');
 
 const DEFAULT_CASTES = [
   'भाट',
@@ -1116,6 +1117,21 @@ router.put('/:id', verifyToken, (req, res, next) => {
     cache.delPrefix(`wards_summary_${orgKey}_`);
     cache.delPrefix(`turnout_summary_${orgKey}_`);
 
+    emitOrgEvent(orgKey, 'voter:updated', {
+      voterId: String(voter._id),
+      sqlId: voter.sqlId,
+      epic: voter.epic,
+      wardNo: voter.wardNo,
+      partNo: voter.partNo,
+      voted: Boolean(voter.voted),
+      migrant: Boolean(voter.migrant),
+      caste: voter.caste || '',
+      supportLevel: voter.supportLevel || 'neutral',
+      phone: voter.phone || '',
+      serialNo: voter.serialNo,
+      nameHi: voter.nameHi || '',
+    });
+
     res.json(voter);
   } catch (err) {
     console.error('Voter update failed:', err.message);
@@ -1154,6 +1170,16 @@ router.put('/:id/vote', verifyToken, requireModule('poll-desk', 'turnout'), asyn
     cache.delPrefix(`turnout_summary_${orgKey}_`);
     cache.delPrefix(`caste_breakdown_${orgKey}_`);
     cache.delPrefix(`dashboard_${orgKey}_`);
+
+    emitOrgEvent(orgKey, 'voter:voted', {
+      voterId: String(voter._id),
+      sqlId: voter.sqlId,
+      epic: voter.epic,
+      voted: Boolean(voter.voted),
+      votedAt: voter.votedAt || null,
+      wardNo: voter.wardNo,
+      partNo: voter.partNo,
+    });
     
     res.json({ success: true, message: 'Vote status updated.' });
   } catch (err) {

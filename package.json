@@ -22,6 +22,7 @@
   "dependencies": {
     "axios": "^1.20.0",
     "bcryptjs": "^3.0.3",
+    "cloudinary": "^2.11.0",
     "compression": "^1.8.2",
     "cors": "^2.8.6",
     "dotenv": "^18.0.6",
@@ -38,9 +39,9 @@
     "node-cron": "^4.6.0",
     "pdf-parse": "^1.1.1",
     "pdf-to-png-converter": "^4.2.1",
+    "socket.io": "^4.8.4",
     "tesseract.js": "^7.0.0",
-    "winston": "^3.19.0",
-    "cloudinary": "^2.11.0"
+    "winston": "^3.19.0"
   },
   "devDependencies": {
     "mongodb-memory-server": "^11.3.0",
