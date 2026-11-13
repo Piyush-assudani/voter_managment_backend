@@ -597,37 +597,6 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
     }
 
     const effectiveOrgId = dbVoter.organizationId || orgId;
-
-    // Check deduplication BEFORE deducting credit
-    const forceSend = req.body.forceSend === true || req.body.force === true;
-    if (!forceSend) {
-      const dedup = checkAndRecordPhoneDispatch(effectiveOrgId, recipientPhone);
-      if (dedup.alreadySent) {
-        return res.json({
-          success: true,
-          deduplicated: true,
-          message: `ℹ️ इस मोबाइल नंबर (${recipientPhone}) पर इसी राउंड में पहले ही संदेश भेजा जा चुका है (${dedup.lastSentAgoSec}s पूर्व)। डुप्लीकेट संदेश रोका गया व क्रेडिट सुरक्षित रहा।`,
-          recipientPhone
-        });
-      }
-    }
-
-    // Verify & deduct 1 credit atomically ONLY after all validations pass
-    const creditCheck = await verifyAndDeductCredit(effectiveOrgId);
-    if (!creditCheck.ok) {
-      return res.status(403).json({ message: creditCheck.error });
-    }
-    creditDeducted = true;
-
-    // Persist phone number to Voter record in DB so it is permanently remembered
-    const cleanPhoneDigits = recipientPhone.slice(-10);
-    if (cleanPhoneDigits && cleanPhoneDigits.length === 10) {
-      await Voter.updateOne(
-        { _id: dbVoter._id },
-        { $set: { phone: cleanPhoneDigits, mobileNo: cleanPhoneDigits } }
-      ).catch(() => {});
-    }
-
     const org = await Organization.findById(effectiveOrgId).lean();
     const candidateName = (
       req.body.candidateName ||
@@ -651,7 +620,7 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
       : null;
     const boothName = (wardStation && wardStation.trim()) || dbVoter.boothName || org?.slipConfig?.pollingStationFallback || `भाग संख्या ${part}`;
 
-    // Create Dispatch record in DB (strictly bound to user's organization)
+    // Create Dispatch record in DB immediately so EVERY attempt is permanently audited in History
     const dispatch = await SlipDispatch.create({
       _id: `disp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       voterId: dbVoter._id,
@@ -663,6 +632,47 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
       sentBy: req.user.fullName || req.user.email || 'Client'
     });
     dispatchId = dispatch._id;
+
+    // Deduplication check: ONLY apply during bulk broadcast if explicitly requested and forceSend is false
+    const forceSend = req.body.forceSend === true || req.body.force === true;
+    const isBulk = req.body.isBulk === true;
+    if (isBulk && !forceSend) {
+      const dedup = checkAndRecordPhoneDispatch(effectiveOrgId, recipientPhone);
+      if (dedup.alreadySent) {
+        await SlipDispatch.updateOne(
+          { _id: dispatchId },
+          { $set: { status: 'skipped', errorMessage: `डुप्लीकेट नंबर (इसी राउंड में ${dedup.lastSentAgoSec}s पूर्व भेजा जा चुका है)` } }
+        ).catch(() => {});
+
+        return res.json({
+          success: true,
+          deduplicated: true,
+          message: `ℹ️ इस मोबाइल नंबर (${recipientPhone}) पर इसी राउंड में पहले ही संदेश भेजा जा चुका है (${dedup.lastSentAgoSec}s पूर्व)। डुप्लीकेट संदेश रोका गया व क्रेडिट सुरक्षित रहा।`,
+          recipientPhone,
+          dispatchId
+        });
+      }
+    }
+
+    // Verify & deduct 1 credit atomically ONLY after all validations pass
+    const creditCheck = await verifyAndDeductCredit(effectiveOrgId);
+    if (!creditCheck.ok) {
+      await SlipDispatch.updateOne(
+        { _id: dispatchId },
+        { $set: { status: 'failed', errorMessage: `क्रेडिट त्रुटि: ${creditCheck.error}` } }
+      ).catch(() => {});
+      return res.status(403).json({ message: creditCheck.error });
+    }
+    creditDeducted = true;
+
+    // Persist phone number to Voter record in DB so it is permanently remembered
+    const cleanPhoneDigits = recipientPhone.slice(-10);
+    if (cleanPhoneDigits && cleanPhoneDigits.length === 10) {
+      await Voter.updateOne(
+        { _id: dbVoter._id },
+        { $set: { phone: cleanPhoneDigits, mobileNo: cleanPhoneDigits } }
+      ).catch(() => {});
+    }
 
     // Handle slip image saving
     let savedImage = null;
@@ -975,6 +985,16 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
         { _id: dispatchId },
         { $set: { status: 'failed', errorMessage: errorDetail } }
       ).catch(() => {});
+    } else {
+      await SlipDispatch.create({
+        _id: `disp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        voterId: req.body.voterId || null,
+        recipientPhone: req.body.phoneNumber || '',
+        status: 'failed',
+        errorMessage: errorDetail,
+        organizationId: getEffectiveOrgId(req) || req.user.organizationId || 'org_default',
+        sentBy: req.user.fullName || req.user.email || 'Client'
+      }).catch(() => {});
     }
 
     if (creditDeducted && !metaAccepted) {
@@ -1018,20 +1038,6 @@ router.post('/send-manual', verifyToken, requireModule('voters'), async (req, re
     const dbVoter = await Voter.findOne(query).lean();
     if (!dbVoter) {
       return res.status(404).json({ message: 'मतदाता रिकॉर्ड नहीं मिला।' });
-    }
-
-    // Deduplication check BEFORE deducting credit
-    const forceSend = req.body.forceSend === true || req.body.force === true;
-    if (!forceSend) {
-      const dedup = checkAndRecordPhoneDispatch(orgId, recipientPhone);
-      if (dedup.alreadySent) {
-        return res.json({
-          success: true,
-          deduplicated: true,
-          message: `ℹ️ इस मोबाइल नंबर (${recipientPhone}) पर इसी राउंड में पहले ही संदेश भेजा जा चुका है (${dedup.lastSentAgoSec}s पूर्व)। डुप्लीकेट संदेश रोका गया व क्रेडिट सुरक्षित रहा।`,
-          recipientPhone
-        });
-      }
     }
 
     const creditCheck = await verifyAndDeductCredit(orgId);
