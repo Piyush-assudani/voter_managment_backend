@@ -682,6 +682,7 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
       savedImage = saveSlipImage(dispatchId, slipImageDataUrl);
       if (savedImage) {
         publicImageUrl = `${getPublicBaseUrl(req)}/uploads/slips/${savedImage.filename}`;
+        await SlipDispatch.updateOne({ _id: dispatchId }, { $set: { slipImageUrl: publicImageUrl } }).catch(() => {});
         mediaId = await uploadMediaToMeta({
           token,
           phoneNumberId,
