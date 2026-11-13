@@ -233,7 +233,6 @@ router.post('/organizations', verifyToken, isAdmin, async (req, res) => {
   }
 
   const id = `tenant_${crypto.randomUUID()}`;
-  const enabledModules = [...new Set([...moduleList, 'accounts'])];
   const allowedWards = Array.isArray(wards)
     ? [...new Set(wards.map((ward) => String(ward).trim()).filter(Boolean))]
     : [];
