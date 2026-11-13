@@ -10,14 +10,15 @@
 const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const MAX_DEPTH = 10;
 const MAX_ARRAY_LENGTH = 5000;
-const MAX_STRING_LENGTH = 100000; // Allows slip data-URLs cleanly while guarding extreme strings
+const MAX_STRING_LENGTH = 100000; // General string limit
+const MAX_DATA_URL_LENGTH = 15 * 1024 * 1024; // 15MB for slip and candidate images (prevents JPEG truncation)
 
-function sanitizeObject(obj, isQuery = false, depth = 0) {
+function sanitizeObject(obj, isQuery = false, depth = 0, currentKey = '') {
   if (depth > MAX_DEPTH) return {};
 
   if (Array.isArray(obj)) {
     const bounded = obj.length > MAX_ARRAY_LENGTH ? obj.slice(0, MAX_ARRAY_LENGTH) : obj;
-    return bounded.map((item) => sanitizeObject(item, isQuery, depth + 1));
+    return bounded.map((item) => sanitizeObject(item, isQuery, depth + 1, currentKey));
   }
 
   if (obj !== null && typeof obj === 'object') {
@@ -33,15 +34,22 @@ function sanitizeObject(obj, isQuery = false, depth = 0) {
         continue;
       }
 
-      clean[key] = sanitizeObject(value, isQuery, depth + 1);
+      clean[key] = sanitizeObject(value, isQuery, depth + 1, key);
     }
     return clean;
   }
 
   if (typeof obj === 'string') {
     let str = obj.replace(/\0/g, '');
-    if (str.length > MAX_STRING_LENGTH) {
-      str = str.slice(0, MAX_STRING_LENGTH);
+    const isImagePayload =
+      str.startsWith('data:image/') ||
+      str.startsWith('data:application/') ||
+      /^(slipImageDataUrl|headerGraphicImage|candidateImage|partySymbolImage)$/i.test(currentKey) ||
+      currentKey.toLowerCase().includes('dataurl');
+
+    const limit = isImagePayload ? MAX_DATA_URL_LENGTH : MAX_STRING_LENGTH;
+    if (str.length > limit) {
+      str = str.slice(0, limit);
     }
     return str;
   }

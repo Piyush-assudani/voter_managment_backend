@@ -75,11 +75,14 @@ function saveSlipImage(dispatchId, dataUrl) {
     return null;
   }
   try {
-    const matches = dataUrl.match(/^data:image\/([a-zA-Z0-9+]+);base64,(.+)$/);
-    if (!matches) return null;
-    const rawExt = matches[1].toLowerCase();
-    const ext = rawExt.includes('jpeg') ? 'jpg' : rawExt.includes('png') ? 'png' : 'webp';
-    const buffer = Buffer.from(matches[2], 'base64');
+    const commaIdx = dataUrl.indexOf(',');
+    if (commaIdx === -1) return null;
+    const metaPart = dataUrl.slice(0, commaIdx).toLowerCase();
+    const base64Part = dataUrl.slice(commaIdx + 1);
+    const isJpeg = metaPart.includes('jpeg') || metaPart.includes('jpg');
+    const isPng = metaPart.includes('png');
+    const ext = isJpeg ? 'jpg' : isPng ? 'png' : 'webp';
+    const buffer = Buffer.from(base64Part, 'base64');
     const filename = `slip_${dispatchId}.${ext}`;
     const targetDir = path.join(__dirname, '../uploads/slips');
     if (!fs.existsSync(targetDir)) {
@@ -87,6 +90,7 @@ function saveSlipImage(dispatchId, dataUrl) {
     }
     const filePath = path.join(targetDir, filename);
     fs.writeFileSync(filePath, buffer);
+    console.log(`[SLIP_IMAGE] Successfully saved ${filename} (${buffer.length} bytes, ext: ${ext})`);
     return {
       filename,
       buffer,
