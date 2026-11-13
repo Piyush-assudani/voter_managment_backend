@@ -222,7 +222,7 @@ router.post('/organizations', verifyToken, isAdmin, async (req, res) => {
     return res.status(400).json({ message: 'पासवर्ड कम-से-कम 8 अक्षरों का होना चाहिए।' });
   }
 
-  if (!Array.isArray(moduleList) || !moduleList.every((module) => availableModules.includes(module))) {
+  if (!Array.isArray(moduleList) || !moduleList.every((module) => allModules.includes(module))) {
     return res.status(400).json({ message: 'कृपया मान्य मॉड्यूल चुनें।' });
   }
 
@@ -309,7 +309,7 @@ router.put('/organizations/:id', verifyToken, isAdmin, async (req, res) => {
   const wards = req.body.wards;
   
   if (typeof name !== 'string' || !name.trim()) return res.status(400).json({ message: 'Organization name is required.' });
-  if (!Array.isArray(moduleList) || !moduleList.every((module) => availableModules.includes(module))) {
+  if (!Array.isArray(moduleList) || !moduleList.every((module) => allModules.includes(module))) {
     return res.status(400).json({ message: 'Choose valid modules.' });
   }
   

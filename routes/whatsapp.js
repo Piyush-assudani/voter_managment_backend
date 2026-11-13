@@ -291,7 +291,7 @@ async function refundCredit(orgId) {
  */
 router.get('/quota', verifyToken, async (req, res) => {
   try {
-    const orgId = req.user.organizationId || 'org_default';
+    const orgId = getEffectiveOrgId(req) || req.user.organizationId || 'org_default';
     let org = await Organization.findById(orgId).lean();
     if (!org && orgId === 'org_default') {
       org = { whatsappEnabled: true, whatsappCredits: 500, whatsappUsed: 0 };
@@ -513,7 +513,7 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
   let dispatchId = null;
   let metaAccepted = false;
   let creditDeducted = false;
-  const orgId = req.user.organizationId || 'org_default';
+  const orgId = getEffectiveOrgId(req) || req.user.organizationId || 'org_default';
 
   try {
     let { voterId, phoneNumber, templateName, slipImageDataUrl } = req.body;
@@ -562,10 +562,12 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
       return res.status(404).json({ message: 'मतदाता रिकॉर्ड नहीं मिला।' });
     }
 
+    const effectiveOrgId = dbVoter.organizationId || orgId;
+
     // Check deduplication BEFORE deducting credit
     const forceSend = req.body.forceSend === true || req.body.force === true;
     if (!forceSend) {
-      const dedup = checkAndRecordPhoneDispatch(orgId, recipientPhone);
+      const dedup = checkAndRecordPhoneDispatch(effectiveOrgId, recipientPhone);
       if (dedup.alreadySent) {
         return res.json({
           success: true,
@@ -577,7 +579,7 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
     }
 
     // Verify & deduct 1 credit atomically ONLY after all validations pass
-    const creditCheck = await verifyAndDeductCredit(orgId);
+    const creditCheck = await verifyAndDeductCredit(effectiveOrgId);
     if (!creditCheck.ok) {
       return res.status(403).json({ message: creditCheck.error });
     }
@@ -592,7 +594,7 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
       ).catch(() => {});
     }
 
-    const org = await Organization.findById(orgId).lean();
+    const org = await Organization.findById(effectiveOrgId).lean();
     const candidateName = (
       req.body.candidateName ||
       org?.slipConfig?.candidateName ||
@@ -623,7 +625,7 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
       voterName,
       recipientPhone,
       status: 'sending',
-      organizationId: orgId,
+      organizationId: effectiveOrgId,
       sentBy: req.user.fullName || req.user.email || 'Client'
     });
     dispatchId = dispatch._id;
@@ -955,7 +957,7 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
  * POST /api/whatsapp/send-manual - Deduct 1 credit, record manual dispatch, save slip image, and generate direct WhatsApp link
  */
 router.post('/send-manual', verifyToken, requireModule('voters'), async (req, res) => {
-  const orgId = req.user.organizationId || 'org_default';
+  const orgId = getEffectiveOrgId(req) || req.user.organizationId || 'org_default';
   let creditDeducted = false;
   let dispatchCompleted = false;
   try {
