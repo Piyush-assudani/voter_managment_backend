@@ -101,6 +101,40 @@ function saveSlipImage(dispatchId, dataUrl) {
 }
 
 /**
+ * Resolve public branding header image for WhatsApp Meta template (Caches base64 to disk if needed)
+ */
+function getPublicBrandingImageUrl(req, org) {
+  if (!org) return `${getPublicBaseUrl(req)}/logo.webp`;
+  const img = org?.slipConfig?.headerGraphicImage || org?.slipConfig?.candidateImage;
+  if (!img || typeof img !== 'string') return `${getPublicBaseUrl(req)}/logo.webp`;
+  if (img.startsWith('http://') || img.startsWith('https://')) {
+    return img;
+  }
+  if (img.startsWith('data:image/')) {
+    try {
+      const matches = img.match(/^data:image\/([a-zA-Z0-9+]+);base64,(.+)$/);
+      if (matches) {
+        const rawExt = matches[1].toLowerCase();
+        const ext = rawExt.includes('jpeg') ? 'jpg' : rawExt.includes('png') ? 'png' : 'webp';
+        const filename = `branding_${org._id || 'default'}.${ext}`;
+        const targetDir = path.join(__dirname, '../uploads/slips');
+        if (!fs.existsSync(targetDir)) {
+          fs.mkdirSync(targetDir, { recursive: true });
+        }
+        const filePath = path.join(targetDir, filename);
+        if (!fs.existsSync(filePath)) {
+          fs.writeFileSync(filePath, Buffer.from(matches[2], 'base64'));
+        }
+        return `${getPublicBaseUrl(req)}/uploads/slips/${filename}`;
+      }
+    } catch (e) {
+      console.warn('Failed to cache base64 branding image:', e.message);
+    }
+  }
+  return `${getPublicBaseUrl(req)}/logo.webp`;
+}
+
+/**
  * Upload image buffer to Meta WhatsApp Media API
  */
 async function uploadMediaToMeta({ token, phoneNumberId, buffer, mimeType, filename }) {
@@ -725,7 +759,10 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
       try {
         const components = [];
         // Header Image (IMAGE header for voter slip)
-        const effectiveImageUrl = publicImageUrl || org?.slipConfig?.headerGraphicImage || `${getPublicBaseUrl(req)}/logo.webp`;
+        let effectiveImageUrl = publicImageUrl || getPublicBrandingImageUrl(req, org);
+        if (effectiveImageUrl && effectiveImageUrl.startsWith('data:image/')) {
+          effectiveImageUrl = `${getPublicBaseUrl(req)}/logo.webp`;
+        }
         if (mediaId || effectiveImageUrl) {
           components.push({
             type: 'header',

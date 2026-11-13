@@ -388,6 +388,17 @@ router.get('/wards-summary', verifyToken, requireModule('voters', 'community', '
               }
             },
             { $count: 'totalFamilies' }
+          ],
+          phoneCount: [
+            {
+              $match: {
+                $or: [
+                  { mobileNo: { $exists: true, $nin: ['', null, '-', '0'] } },
+                  { phone: { $exists: true, $nin: ['', null, '-', '0'] } }
+                ]
+              }
+            },
+            { $count: 'count' }
           ]
         }
       }
@@ -395,6 +406,7 @@ router.get('/wards-summary', verifyToken, requireModule('voters', 'community', '
     const rawWards = summaryFacet?.rawWards || [];
     const total = summaryFacet?.totalCount?.[0]?.total || 0;
     const familyFacet = summaryFacet?.familyCount || [];
+    const totalWithPhone = summaryFacet?.phoneCount?.[0]?.count || 0;
     const wards = rawWards
       .filter((w) => {
         if (w._id === null || w._id === undefined) return false;
@@ -413,7 +425,7 @@ router.get('/wards-summary', verifyToken, requireModule('voters', 'community', '
         return String(a._id).localeCompare(String(b._id));
       });
     const totalFamilies = familyFacet?.[0]?.totalFamilies || 0;
-    const result = { wards, total, totalFamilies };
+    const result = { wards, total, totalFamilies, totalWithPhone };
     cache.set(cacheKey, result, 300);
     res.json(result);
   } catch (err) {
@@ -847,6 +859,13 @@ router.get('/', verifyToken, requireModule('voters', 'community', 'workers', 'mi
             { mobileNo: '-' }
           ]
         };
+      } else if (issueKey === 'has_phone') {
+        issueFilter = {
+          $or: [
+            { mobileNo: { $exists: true, $nin: ['', null, '-', '0'] } },
+            { phone: { $exists: true, $nin: ['', null, '-', '0'] } }
+          ]
+        };
       } else if (issueKey === 'deleted') {
         query.status = { $in: ['Deleted', 'विलोपित'] };
       } else if (issueKey === 'any_issue') {
@@ -873,6 +892,23 @@ router.get('/', verifyToken, requireModule('voters', 'community', 'workers', 'mi
         } else {
           Object.assign(query, issueFilter);
         }
+      }
+    }
+
+    if (req.query.hasPhone === 'true' || req.query.has_phone === 'true') {
+      const phoneFilter = {
+        $or: [
+          { mobileNo: { $exists: true, $nin: ['', null, '-', '0'] } },
+          { phone: { $exists: true, $nin: ['', null, '-', '0'] } }
+        ]
+      };
+      if (query.$and) {
+        query.$and.push(phoneFilter);
+      } else if (query.$or) {
+        query.$and = [{ $or: query.$or }, phoneFilter];
+        delete query.$or;
+      } else {
+        Object.assign(query, phoneFilter);
       }
     }
 
