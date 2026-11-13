@@ -686,7 +686,7 @@ router.post('/send-slip', verifyToken, requireModule('voters'), async (req, res)
       savedImage = saveSlipImage(dispatchId, slipImageDataUrl);
       if (savedImage) {
         publicImageUrl = `${getPublicBaseUrl(req)}/uploads/slips/${savedImage.filename}`;
-        await SlipDispatch.updateOne({ _id: dispatchId }, { $set: { slipImageUrl: publicImageUrl } }).catch(() => {});
+        await SlipDispatch.updateOne({ _id: dispatchId }, { $set: { slipImageUrl: publicImageUrl, mediaUrl: publicImageUrl } }).catch(() => {});
         mediaId = await uploadMediaToMeta({
           token,
           phoneNumberId,
@@ -950,7 +950,7 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
 
     await SlipDispatch.updateOne(
       { _id: dispatchId },
-      { $set: { status: 'sent', providerMessageId, slipImageUrl: publicImageUrl } }
+      { $set: { status: 'sent', providerMessageId, slipImageUrl: publicImageUrl, mediaUrl: publicImageUrl } }
     );
 
     res.json({

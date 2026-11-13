@@ -152,6 +152,7 @@ const slipDispatchSchema = new mongoose.Schema({
   messageContent: { type: String, default: '' },
   templateName: { type: String, default: '' },
   mediaUrl: { type: String, default: '' },
+  slipImageUrl: { type: String, default: '' },
   campaignName: { type: String, default: '' },
   windowExpiresAt: { type: Date, default: null },
   conversationHistory: {
@@ -160,6 +161,7 @@ const slipDispatchSchema = new mongoose.Schema({
         direction: { type: String, enum: ['outbound', 'inbound'], default: 'outbound' },
         text: { type: String, default: '' },
         mediaUrl: { type: String, default: '' },
+  slipImageUrl: { type: String, default: '' },
         status: { type: String, default: 'sent' }, // sent, delivered, read
         timestamp: { type: Date, default: Date.now },
         messageId: { type: String, default: null }
