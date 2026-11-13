@@ -419,6 +419,8 @@ router.post('/webhook', async (req, res) => {
                 let errorMsg = `Meta डिलीवरी विफल (#${errCode || 'err'}): ${errTitle || 'त्रुटि'}`;
                 if (errCode === 131049 || errCode === 131056) {
                   errorMsg = 'Meta मार्केटिंग सीमा (#131049): समान नंबर पर हाल ही में संदेश भेजा गया था, Meta ने डिलीवरी होल्ड/रोक दी।';
+                } else if (errCode === 131042) {
+                  errorMsg = 'Meta पेमेंट समस्या (#131042): Meta Business Manager में WhatsApp Business Account पर पेमेंट मेथड (कार्ड/बिलिंग) सेटअप नहीं है या पेंडिंग है। कृपया "डायरेक्ट WhatsApp" का प्रयोग करें।';
                 } else if (errCode === 131026) {
                   errorMsg = 'Meta (#131026): मोबाइल नंबर WhatsApp पर मौजूद नहीं है या अमान्य है।';
                 } else if (errCode === 131047) {
@@ -913,6 +915,8 @@ ${publicImageUrl ? `🖼️ डिजिटल पर्ची फोटो: ${p
     // Helpful error messages for common Meta codes
     if (err.isTemplatePending) {
       errorDetail = err.message;
+    } else if (errorCode === 131042) {
+      errorDetail = 'Meta पेमेंट समस्या (#131042): Meta Business Manager में WhatsApp Business Account पर पेमेंट मेथड (कार्ड) सेटअप नहीं है या पेंडिंग है। कृपया Meta Business Suite में कार्ड जोड़ें या "डायरेक्ट WhatsApp (फोटो + पर्ची)" का उपयोग करें।';
     } else if (errorCode === 131030) {
       errorDetail = `Meta टेस्ट मोड प्रतिबंध (#131030): नंबर (+91 ${recipientPhone?.slice(-10)}) Meta Developer Console की Allowed Numbers लिस्ट में नहीं है। कृपया Meta Developers Console में जाकर यह नंबर जोड़ें या फिर "डायरेक्ट WhatsApp भेजें" (1-Click) का उपयोग करें।`;
     } else if (errorCode === 131049 || errorCode === 131056) {
