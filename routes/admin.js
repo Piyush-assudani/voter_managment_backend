@@ -222,9 +222,9 @@ router.post('/organizations', verifyToken, isAdmin, async (req, res) => {
     return res.status(400).json({ message: 'पासवर्ड कम-से-कम 8 अक्षरों का होना चाहिए।' });
   }
 
-  if (!Array.isArray(moduleList) || !moduleList.every((module) => allModules.includes(module))) {
-    return res.status(400).json({ message: 'कृपया मान्य मॉड्यूल चुनें।' });
-  }
+  const enabledModules = Array.isArray(moduleList)
+    ? [...new Set([...moduleList.filter((m) => typeof m === 'string' && m.trim().length > 0), 'accounts'])]
+    : allModules;
 
   const sanitizedEmail = email.trim().toLowerCase();
   const existingUser = await User.findOne({ email: sanitizedEmail }).lean();
@@ -309,12 +309,11 @@ router.put('/organizations/:id', verifyToken, isAdmin, async (req, res) => {
   const wards = req.body.wards;
   
   if (typeof name !== 'string' || !name.trim()) return res.status(400).json({ message: 'Organization name is required.' });
-  if (!Array.isArray(moduleList) || !moduleList.every((module) => allModules.includes(module))) {
-    return res.status(400).json({ message: 'Choose valid modules.' });
-  }
   
   try {
-    const enabledModules = [...new Set([...moduleList, 'accounts'])];
+    const enabledModules = Array.isArray(moduleList)
+      ? [...new Set([...moduleList.filter((m) => typeof m === 'string' && m.trim().length > 0), 'accounts'])]
+      : allModules;
     const allowedWards = Array.isArray(wards)
       ? [...new Set(wards.map((ward) => String(ward).trim()).filter(Boolean))]
       : [];
