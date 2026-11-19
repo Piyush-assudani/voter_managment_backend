@@ -207,6 +207,14 @@ const ExcelJS = require('exceljs');
       try {
         const pyResult = await runPythonPdfToExcel(filePath, targetExcelPath, wardNo || defaultWardNo, boothNo || '', photosDir);
         console.log(`[pdfWorker] Python engine finished successfully:`, pyResult);
+        // Glyph-exact engine: text is decoded from the PDF's own font glyphs and
+        // self-verified against the counts printed in the PDF, so the name-repair
+        // and gender-guessing heuristics below must not rewrite it.
+        const exactEngine = pyResult && pyResult.engineUsed === 'glyph_exact';
+        if (exactEngine && pyResult.verification && !pyResult.verification.ok) {
+          const failed = (pyResult.verification.checks || []).filter(c => !c.ok).map(c => c.check);
+          console.warn(`[pdfWorker] Glyph-exact engine verification warnings: ${failed.join(', ')}`);
+        }
 
         // Upload extracted photos to Cloudinary automatically
         if (withPhotos !== false && photosDir && fs.existsSync(photosDir)) {
@@ -378,7 +386,7 @@ const ExcelJS = require('exceljs');
           const serialVal = rawSerial ? parseInt(rawSerial, 10) : null;
           const epic = cellVal(row, 'epic', fallbackCol.epic);
           const rawName = cellVal(row, 'nameHi', fallbackCol.nameHi);
-          let cleanName = rawName ? fixCorruptedHindi(cleanLabelAndEpic(rawName)) : '';
+          let cleanName = rawName ? (exactEngine ? String(rawName).trim() : fixCorruptedHindi(cleanLabelAndEpic(rawName))) : '';
 
           // Salvage attempt: If cleanName failed garbage check, check if rawName had genuine name tokens
           if ((!cleanName || isGarbageName(cleanName)) && rawName) {
@@ -406,9 +414,11 @@ const ExcelJS = require('exceljs');
           if (cleanName && !isGarbageName(cleanName)) {
             const rawNameEn = cellVal(row, 'nameEn', fallbackCol.nameEn);
             const rawRel = cellVal(row, 'relativeNameHi', fallbackCol.relativeNameHi);
-            let cleanRel = rawRel ? fixCorruptedHindi(cleanLabelAndEpic(rawRel)) : '';
-            if (isGarbageName(cleanRel)) cleanRel = '';
-            cleanRel = stripNameFromRelative(cleanName, cleanRel);
+            let cleanRel = rawRel ? (exactEngine ? String(rawRel).trim() : fixCorruptedHindi(cleanLabelAndEpic(rawRel))) : '';
+            if (!exactEngine) {
+              if (isGarbageName(cleanRel)) cleanRel = '';
+              cleanRel = stripNameFromRelative(cleanName, cleanRel);
+            }
             cleanRel = cleanRel.replace(/[\u0964\u0965\|_]+/g, ' ').replace(/^[:ः;\-=\._\s]+/, '').trim();
             const rawRelEn = cellVal(row, 'relativeNameEn', fallbackCol.relativeNameEn);
             const cleanH = cleanHouseNo(cellVal(row, 'houseNo', fallbackCol.houseNo));
@@ -438,7 +448,9 @@ const ExcelJS = require('exceljs');
             const nameTokens = cleanName.split(/\s+/).filter(Boolean);
             const lastWord = nameTokens[nameTokens.length - 1] || '';
 
-            if (relType === 'पति') {
+            if (exactEngine && ['पुरुष', 'स्त्री', 'तृतीय लिंग'].includes(genderVal)) {
+              // printed in the PDF: keep as is
+            } else if (relType === 'पति') {
               genderVal = 'स्त्री';
             } else if (FEMALE_LAST_WORDS.has(lastWord) || ['देवी', 'कुमारी', 'बाई', 'बेगम', 'कंवर', 'श्रीमती'].some(fem => cleanName.includes(fem))) {
               genderVal = 'स्त्री';
@@ -451,6 +463,7 @@ const ExcelJS = require('exceljs');
             const villageEn = cleanVillageOrSectionName(cellVal(row, 'villageName', 17));
             const villageHi = cleanVillageOrSectionName(cellVal(row, 'villageNameHi', 18));
             let statusVal = cellVal(row, 'status') || 'Active';
+            if (exactEngine && /^विलोपित|^Deleted/i.test(statusVal)) statusVal = 'Deleted';
             if (cleanName.includes('विलोपित') || (epic && epic.includes('विलोपित')) || (rawSerial && String(rawSerial).includes('विलोपित'))) {
               statusVal = 'Deleted';
             }
