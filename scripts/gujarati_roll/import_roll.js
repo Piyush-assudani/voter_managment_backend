@@ -21,6 +21,7 @@ const path = require('path');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
 require('../../models');
+const { casteFromName } = require('../../lib/gujaratiCaste');
 
 const args = {};
 for (let i = 2; i < process.argv.length; i++) {
@@ -65,6 +66,8 @@ function readRows(file) {
   if (!org) throw new Error(`organization ${args.org} not found`);
 
   let inserted = 0, updated = 0, skipped = 0, photos = 0;
+  // Caste = surname (last word of the name); spelling variants reuse an existing caste name.
+  const knownCastes = Array.isArray(org.casteOptions) ? [...org.casteOptions] : [];
   for (const r of rows) {
     if (DELETED.has(r.flag)) { skipped++; continue; }
     const filter = { organizationId: args.org, partNo: String(args.part), serialNo: r.serial };
@@ -77,6 +80,7 @@ function readRows(file) {
       houseNo: r.house, houseNoHi: r.house,
       villageName: args.section || '', villageNameHi: args.section || '', boothName: args.booth || '',
       familyId: `FAM_W${args.ward}_P${args.part}_H${r.house.replace(/\s+/g, '')}`,
+      caste: casteFromName(r.name, knownCastes),
       organizationId: args.org,
     };
 
@@ -101,12 +105,22 @@ function readRows(file) {
       if (existing) await Voter.updateOne({ _id: voterId }, { $set: fields });
       else await Voter.create({ _id: voterId, ...fields, mobileNo: '', caste: '', supportStatus: 'unmarked', status: 'Active' });
     }
+    if (fields.caste && !knownCastes.includes(fields.caste)) knownCastes.push(fields.caste);
     existing ? updated++ : inserted++;
   }
 
   if (!args.dryRun) {
     const wards = new Set([...(org.wards || []), String(args.ward)]);
-    await Organization.updateOne({ _id: args.org }, { $set: { wards: [...wards] } });
+    // Caste options ordered by how many voters each caste has in this client.
+    const counts = await Voter.aggregate([
+      { $match: { organizationId: args.org, caste: { $nin: [null, ''] } } },
+      { $group: { _id: '$caste', n: { $sum: 1 } } },
+      { $sort: { n: -1 } },
+    ]);
+    await Organization.updateOne(
+      { _id: args.org },
+      { $set: { wards: [...wards], casteOptions: counts.map((c) => c._id) } }
+    );
   }
   console.log(JSON.stringify({ dryRun: !!args.dryRun, inserted, updated, skippedDeleted: skipped, photos }));
   await mongoose.disconnect();

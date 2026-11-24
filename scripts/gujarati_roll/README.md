@@ -45,5 +45,8 @@ re-run safely. Photos go into the `voterphotos` collection and are linked as
 `PUBLIC_URL/media/vp/<id>.webp`, which `index.js` serves. Because they live in MongoDB, no
 frontend deploy is needed for new photos.
 
+Each voter's caste is set from the surname (last word of the name). Spelling variants are
+merged (`lib/gujaratiCaste.js`), and the client's caste list is rebuilt, ordered by voter count.
+
 Photos then show up automatically wherever a voter has one: the voter card, the slip, the
 family slip, the poll-desk print/PDF, and both Excel exports (embedded).

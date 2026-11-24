@@ -97,7 +97,8 @@ const applyPanchayatFilter = (query, panchayat) => {
 const getCasteOptionsHandler = async (req, res) => {
   try {
     const userId = req.user?.id;
-    const orgId = req.user?.organizationId || getEffectiveOrgId(req);
+    // Admins viewing a client get that client's castes.
+    const orgId = (req.user?.role === 'admin' && getEffectiveOrgId(req)) || req.user?.organizationId || getEffectiveOrgId(req);
 
     // 1. Check user-level caste options
     if (userId) {
@@ -134,7 +135,8 @@ const getCasteOptionsHandler = async (req, res) => {
 router.get('/caste-options', verifyToken, getCasteOptionsHandler);
 router.get('/castes', verifyToken, async (req, res) => {
   try {
-    const orgId = req.user?.organizationId || getEffectiveOrgId(req);
+    // Admins viewing a client get that client's castes.
+    const orgId = (req.user?.role === 'admin' && getEffectiveOrgId(req)) || req.user?.organizationId || getEffectiveOrgId(req);
     const org = await Organization.findById(orgId).lean();
     const castes = org?.casteOptions || org?.customCastes || DEFAULT_CASTES;
     res.json({ success: true, castes, casteOptions: castes });

@@ -585,6 +585,31 @@ router.get('/community', requireModule('community'), async (req, res) => {
         v.caste || 'अन्य',
         v.voted ? 'मतदान दर्ज' : 'मतदान बाकी'
       ]);
+      // Gujarati rolls (e.g. scanned rolls with photos): Gujarati headers/values, printed serial, photo.
+      const isGujaratiRoll = finalVoters.some((v) => /[\u0A80-\u0AFF]/.test(v.nameHi || ''));
+      if (isGujaratiRoll) {
+        const GU = { 'पुरुष': 'પુરુષ', 'स्त्री': 'સ્ત્રી', 'महिला': 'સ્ત્રી', 'पिता': 'પિતા', 'पति': 'પતિ', 'माता': 'માતા', 'अन्य': 'અન્ય', 'पत्नी': 'પત્ની' };
+        const gu = (x) => GU[x] || x || '';
+        const guHeaders = ['અનુ. નં.', 'મતદારનું નામ', 'સંબંધીનું નામ', 'સંબંધ', 'જાતિ (લિંગ)', 'ઉંમર', 'વોર્ડ નં.', 'ભાગ નં.', 'ઘર નંબર', 'ઓળખ પત્ર (EPIC)', 'મોબાઇલ નંબર', 'જ્ઞાતિ', 'મતદાન સ્થિતિ'];
+        const guRows = finalVoters.map((v) => [
+          v.serialNo || '',
+          v.nameHi || v.nameEn || '',
+          v.relativeNameHi || v.relativeNameEn || '',
+          gu(v.relationType),
+          gu(v.gender),
+          v.age || '',
+          v.wardNo || '',
+          v.partNo || '',
+          v.houseNo || '',
+          v.epic || '',
+          v.mobileNo || '',
+          v.caste || 'અન્ય',
+          v.voted ? 'મતદાન નોંધાયું' : 'મતદાન બાકી'
+        ]);
+        const sheet = addSheet(workbook, 'Caste_Voters', guHeaders, guRows);
+        if (hasStoredPhotos(finalVoters)) await embedVoterPhotos(workbook, sheet, finalVoters, 'ફોટો');
+        return sendWorkbook(res, workbook, `Caste_Voters_${casteParam || 'Report'}_${Date.now()}`);
+      }
       addSheet(workbook, 'Caste_Voters', headers, rows);
       const filename = `Caste_Voters_${casteParam || 'Report'}_${Date.now()}`;
       return sendWorkbook(res, workbook, filename);
