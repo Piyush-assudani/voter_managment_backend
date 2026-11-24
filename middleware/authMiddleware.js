@@ -1,3 +1,4 @@
+const { getHiddenOrgIds, requestedOrgIds } = require('../lib/privateOrgs');
 const crypto = require('node:crypto');
 const jwt = require('jsonwebtoken');
 const { User, Organization } = require('../models/index');
@@ -158,6 +159,15 @@ const verifyToken = async (req, res, next) => {
       permissions: user.permissions || {},
       permissionsList: rbacResolved.permissions || [],
     };
+
+    // Private clients: hide them from platform admins who are not on the org's allow-list.
+    req.user.hiddenOrgIds = await getHiddenOrgIds(req.user);
+    if (req.user.hiddenOrgIds.length) {
+      const targeted = requestedOrgIds(req);
+      if (targeted.some((id) => req.user.hiddenOrgIds.includes(id))) {
+        return res.status(404).json({ message: 'क्लाइंट नहीं मिला।' });
+      }
+    }
     return next();
   } catch (err) {
     console.error('verifyToken lookup error:', err.message);

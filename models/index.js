@@ -227,6 +227,17 @@ const campaignTemplateSchema = new mongoose.Schema({
 
 campaignTemplateSchema.index({ status: 1, organizationId: 1 });
 
+// Voter photos cut from electoral-roll PDFs (WebP), served by /media/vp/:id.webp.
+// Kept out of the voters collection so list queries stay small.
+const voterPhotoSchema = new mongoose.Schema({
+  _id: { type: String, required: true },          // random hex id used in the public URL
+  organizationId: { type: String, required: true, index: true },
+  voterId: { type: String, index: true },
+  contentType: { type: String, default: 'image/webp' },
+  data: { type: Buffer, required: true },
+  createdAt: { type: Date, default: Date.now }
+});
+
 const Organization = mongoose.model('Organization', organizationSchema);
 const User = mongoose.model('User', userSchema);
 const Voter = mongoose.model('Voter', voterSchema);
@@ -235,6 +246,7 @@ const Lead = mongoose.model('Lead', leadSchema);
 const LearnedDictionary = mongoose.model('LearnedDictionary', learnedDictionarySchema);
 const SystemSetting = mongoose.model('SystemSetting', systemSettingSchema);
 const CampaignTemplate = mongoose.model('CampaignTemplate', campaignTemplateSchema);
+const VoterPhoto = mongoose.model('VoterPhoto', voterPhotoSchema);
 
 module.exports = {
   Organization,
@@ -244,6 +256,7 @@ module.exports = {
   Lead,
   LearnedDictionary,
   SystemSetting,
-  CampaignTemplate
+  CampaignTemplate,
+  VoterPhoto
 };
 

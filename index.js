@@ -82,6 +82,25 @@ app.use(sanitizeInput);
 app.use('/uploads', express.static(path.join(__dirname, 'uploads'), { dotfiles: 'ignore', maxAge: '1d' }));
 app.use(express.static(path.join(__dirname, 'public'), { index: false, dotfiles: 'ignore', maxAge: '1d' }));
 
+// Voter photos stored in MongoDB (random, unguessable ids; long cache). Not cached as immutable
+// across re-imports because ids are reused, so keep a one-day cache.
+app.get('/media/vp/:id', async (req, res) => {
+  const id = String(req.params.id || '').replace(/\.(webp|jpe?g)$/i, '');
+  if (!/^[a-f0-9]{32}$/.test(id)) return res.status(404).end();
+  try {
+    const photo = await mongoose.model('VoterPhoto').findById(id).select('data contentType').lean();
+    if (!photo) return res.status(404).end();
+    res.setHeader('Content-Type', photo.contentType || 'image/webp');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    return res.end(photo.data.buffer ? Buffer.from(photo.data.buffer) : photo.data);
+  } catch (err) {
+    logger.error('Voter photo fetch failed', { message: err.message });
+    return res.status(500).end();
+  }
+});
+
 // Health check
 app.get('/api/health', async (_req, res) => {
   try {

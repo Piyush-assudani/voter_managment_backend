@@ -1,3 +1,4 @@
+const { hiddenOrgFilter, visibilityKey } = require('../lib/privateOrgs');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cache = require('../lib/cache');
@@ -130,7 +131,7 @@ exports.login = async (req, res) => {
 exports.getClients = async (req, res) => {
   try {
     const isPlatformAdmin = req.user.role === 'admin';
-    const cacheKey = `clients_list_${isPlatformAdmin ? 'admin' : (req.user.organizationId || 'org')}`;
+    const cacheKey = `clients_list_${isPlatformAdmin ? 'admin' : (req.user.organizationId || 'org')}${visibilityKey(req)}`;
     const noCache = req.headers['cache-control'] === 'no-cache' || req.query.fresh === 'true';
     if (!noCache) {
       const cached = cache.get(cacheKey);
@@ -138,7 +139,7 @@ exports.getClients = async (req, res) => {
     }
 
     if (isPlatformAdmin) {
-      const orgs = await Organization.find({ isActive: { $ne: false }, _id: { $ne: 'org_default' } }).sort({ name: 1 }).lean();
+      const orgs = await Organization.find({ isActive: { $ne: false }, _id: { $ne: 'org_default', ...(hiddenOrgFilter(req) || {}) } }).sort({ name: 1 }).lean();
       const orgIds = orgs.map((o) => o._id);
       const voterCounts = await Voter.aggregate([
         { $match: { organizationId: { $in: orgIds } } },

@@ -23,6 +23,16 @@ const canAccessOrganization = (req, orgId) => (
   Boolean(req.user && orgId && (req.user.role === 'admin' || req.user.organizationId === orgId))
 );
 
+const { hiddenOrgFilter, visibilityKey } = require('../lib/privateOrgs');
+const { hasStoredPhotos, embedVoterPhotos } = require('../lib/voterPhotos');
+
+// True when the target user belongs to a client this admin is not allowed to see.
+async function isHiddenUser(req, userId) {
+  const hidden = req.user?.hiddenOrgIds || [];
+  if (!hidden.length) return false;
+  const target = await mongoose.model('User').findById(userId).select('organizationId').lean();
+  return Boolean(target && hidden.includes(String(target.organizationId)));
+}
 const router = express.Router();
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -118,9 +128,9 @@ router.get('/diagnose-photo-pipeline', verifyToken, isAdmin, async (_req, res) =
   res.json(report);
 });
 
-router.get('/organizations', verifyToken, isAdmin, async (_req, res) => {
+router.get('/organizations', verifyToken, isAdmin, async (req, res) => {
   try {
-    const orgs = await Organization.find({ _id: { $ne: 'org_default' } }).sort({ createdAt: -1 }).lean();
+    const orgs = await Organization.find({ _id: { $ne: 'org_default', ...(hiddenOrgFilter(req) || {}) } }).sort({ createdAt: -1 }).lean();
     const orgIds = orgs.map((o) => o._id);
 
     const [userStats, voterStats, tenantAdmins] = await Promise.all([
@@ -576,11 +586,12 @@ router.put('/caste-options', verifyToken, isAdmin, async (req, res) => {
 router.get('/dashboard-stats', verifyToken, isAdmin, async (req, res) => {
   try {
     const { orgId } = req.query;
-    const cacheKey = `admin_dash_stats_${orgId || 'all'}`;
+    const cacheKey = `admin_dash_stats_${orgId || 'all'}${visibilityKey(req)}`;
     const cached = cache.get(cacheKey);
     if (cached) return res.json(cached);
 
-    const filter = orgId && orgId !== 'all' ? { organizationId: orgId } : {};
+    const hiddenFilter = hiddenOrgFilter(req);
+    const filter = orgId && orgId !== 'all' ? { organizationId: orgId } : (hiddenFilter ? { organizationId: hiddenFilter } : {});
 
     const [
       totalVoters,
@@ -593,7 +604,7 @@ router.get('/dashboard-stats', verifyToken, isAdmin, async (req, res) => {
       votedCount
     ] = await Promise.all([
       Voter.countDocuments(filter),
-      Organization.countDocuments({ _id: { $ne: 'org_default' } }),
+      Organization.countDocuments({ _id: { $ne: 'org_default', ...(hiddenFilter || {}) } }),
       User.countDocuments(filter.organizationId ? { organizationId: filter.organizationId, role: { $ne: 'admin' } } : { role: { $ne: 'admin' } }),
       SlipDispatch.countDocuments(filter.organizationId ? { organizationId: filter.organizationId } : {}),
       Voter.distinct('wardNo', filter),
@@ -839,7 +850,8 @@ router.delete('/organizations/:id', verifyToken, isAdmin, async (req, res) => {
 router.get('/users', verifyToken, isAdmin, async (req, res) => {
   try {
     const orgId = typeof req.query.organizationId === 'string' ? req.query.organizationId.trim() : '';
-    const query = orgId ? { organizationId: orgId } : {};
+    const hiddenFilter = hiddenOrgFilter(req);
+    const query = orgId ? { organizationId: orgId } : (hiddenFilter ? { organizationId: hiddenFilter } : {});
     
     const users = await User.find(query).sort({ createdAt: -1 }).lean();
     
@@ -896,6 +908,7 @@ router.post('/users', verifyToken, isAdmin, async (req, res) => {
 
 router.delete('/users/:id', verifyToken, isAdmin, async (req, res) => {
   try {
+    if (await isHiddenUser(req, req.params.id)) return res.status(404).json({ message: 'User not found.' });
     const result = await User.deleteOne({ _id: req.params.id });
     if (result.deletedCount === 0) return res.status(404).json({ message: 'User not found.' });
     res.json({ message: 'User deleted.' });
@@ -907,6 +920,7 @@ router.delete('/users/:id', verifyToken, isAdmin, async (req, res) => {
 
 router.put('/users/:id/role', verifyToken, isAdmin, async (req, res) => {
   try {
+    if (await isHiddenUser(req, req.params.id)) return res.status(404).json({ message: 'User not found.' });
     const { role, subRole, scopeType, scopeValue, modules } = req.body;
     if (!role) return res.status(400).json({ message: 'Role is required.' });
     
@@ -927,6 +941,7 @@ router.put('/users/:id/role', verifyToken, isAdmin, async (req, res) => {
 
 router.put('/users/:id/active', verifyToken, isAdmin, async (req, res) => {
   try {
+    if (await isHiddenUser(req, req.params.id)) return res.status(404).json({ message: 'User not found.' });
     const { isActive } = req.body;
     if (typeof isActive !== 'boolean') return res.status(400).json({ message: 'Invalid active status.' });
     const result = await User.updateOne({ _id: req.params.id }, { $set: { isActive } });
@@ -943,12 +958,13 @@ router.get('/master-data', verifyToken, isAdmin, async (req, res) => {
   const ward = typeof req.query.ward === 'string' ? req.query.ward.trim() : '';
   const page = parseInt(req.query.page) || 1;
   const limit = parseInt(req.query.limit) || 1000;
-  const query = orgId ? { organizationId: orgId } : {};
+  const hiddenFilter = hiddenOrgFilter(req);
+  const query = orgId ? { organizationId: orgId } : (hiddenFilter ? { organizationId: hiddenFilter } : {});
   if (ward) {
     query.wardNo = ward;
   }
     
-  const cacheKey = `master_data_${orgId || 'all'}_w${ward || 'all'}_p${page}_l${limit}`;
+  const cacheKey = `master_data_${orgId || 'all'}_w${ward || 'all'}_p${page}_l${limit}${visibilityKey(req)}`;
   const cachedData = cache.get(cacheKey);
   if (cachedData) return res.json(cachedData);
 
@@ -1582,13 +1598,15 @@ router.post(
 router.get('/export-voters', verifyToken, isAdmin, async (req, res) => {
   try {
     const orgId = typeof req.query.organizationId === 'string' ? req.query.organizationId.trim() : '';
-    const query = orgId ? { organizationId: orgId } : {};
+    const hiddenFilter = hiddenOrgFilter(req);
+    const query = orgId ? { organizationId: orgId } : (hiddenFilter ? { organizationId: hiddenFilter } : {});
     
     const voters = await Voter.find(query).sort({ wardNo: 1, partNo: 1, serialNo: 1 }).lean();
     
     const workbook = createWorkbook();
-    addSheet(workbook, 'मतदाता सूची', voters.map((v, index) => ({
-      'क्रमांक': index + 1,
+    const withPhotos = hasStoredPhotos(voters);
+    const mainSheet = addSheet(workbook, 'मतदाता सूची', voters.map((v, index) => ({
+      'क्रमांक': withPhotos ? v.serialNo : index + 1,
       'पहचान पत्र (EPIC No)': v.epic,
       'मतदाता का नाम': v.nameHi || '',
       'संबंधी का नाम': v.relativeNameHi || '',
@@ -1606,6 +1624,7 @@ router.get('/export-voters', verifyToken, isAdmin, async (req, res) => {
       'समर्थन स्थिति': v.supportStatus || 'Neutral',
       'मतदान स्थिति': v.voted ? 'वोट दिया' : 'शेष'
     })));
+    if (withPhotos) await embedVoterPhotos(workbook, mainSheet, voters, 'फोटो');
 
     addSheet(workbook, 'Voters', voters.map((v, index) => ({
       'EPIC No': v.epic,

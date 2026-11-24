@@ -17,6 +17,8 @@ const selectAccounts = async (req, workersOnly) => {
   const targetOrgId = getEffectiveOrgId(req);
   if (targetOrgId) {
     query.organizationId = targetOrgId;
+  } else if (Array.isArray(req.user?.hiddenOrgIds) && req.user.hiddenOrgIds.length) {
+    query.organizationId = { $nin: req.user.hiddenOrgIds };
   }
   
   if (workersOnly) {

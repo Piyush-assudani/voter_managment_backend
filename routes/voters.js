@@ -314,7 +314,8 @@ router.get('/turnout-pending', verifyToken, requireModule('voters', 'poll-desk',
       gender: 1,
       mobileNo: 1,
       supportStatus: 1,
-      voted: 1
+      voted: 1,
+      photoUrl: 1
     };
 
     const [total, rawVoters] = await Promise.all([

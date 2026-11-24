@@ -5,6 +5,7 @@ const { createWorkbook, addSheet, sendWorkbook } = require('../lib/xlsx');
 const { Voter, Organization, SlipDispatch, User, SystemSetting } = require('../models/index');
 const cache = require('../lib/cache');
 
+const { hasStoredPhotos, embedVoterPhotos } = require('../lib/voterPhotos');
 const router = express.Router();
 
 const appendOrFilter = (targetQuery, orArray) => {
@@ -299,7 +300,7 @@ router.get('/caste-breakdown', requireModule('community', 'voters'), async (req,
   try {
     const orgId = getEffectiveOrgId(req);
     const wardKey = typeof req.query.ward === 'string' ? req.query.ward.trim() : 'all';
-    const cacheKey = `caste_breakdown_${orgId}_${wardKey}`;
+    const cacheKey = `caste_breakdown_${orgId}_${wardKey}${orgId ? '' : `_u${req.user?.id || ''}`}`;
     const cachedData = cache.get(cacheKey);
     if (cachedData) return res.json(cachedData);
 
@@ -611,6 +612,8 @@ router.get('/dispatches', requireModule('history'), async (req, res) => {
     const targetOrgId = getEffectiveOrgId(req);
     if (targetOrgId) {
       query.organizationId = targetOrgId;
+    } else if (req.user?.hiddenOrgIds?.length) {
+      query.organizationId = { $nin: req.user.hiddenOrgIds };
     }
 
     if (typeof req.query.search === 'string' && req.query.search.trim()) {
@@ -760,6 +763,8 @@ router.delete('/dispatches', async (req, res) => {
     const targetOrgId = getEffectiveOrgId(req);
     if (targetOrgId) {
       query.organizationId = targetOrgId;
+    } else if (req.user?.hiddenOrgIds?.length) {
+      query.organizationId = { $nin: req.user.hiddenOrgIds };
     }
 
     if (Array.isArray(ids) && ids.length > 0) {
@@ -806,6 +811,8 @@ router.get('/export.xlsx', async (req, res) => {
       const targetOrgId = getEffectiveOrgId(req);
       if (targetOrgId) {
         dispatchQuery.organizationId = targetOrgId;
+      } else if (req.user?.hiddenOrgIds?.length) {
+        dispatchQuery.organizationId = { $nin: req.user.hiddenOrgIds };
       }
       if (typeof req.query.search === 'string' && req.query.search.trim()) {
         const search = new RegExp(escapeRegex(req.query.search.trim()), 'i');
@@ -909,24 +916,30 @@ router.get('/export.xlsx', async (req, res) => {
     }
 
     const workbook = createWorkbook();
-    addSheet(workbook, 'Export', voters.map((v, index) => ({
+    // Rolls imported with photos (e.g. Gujarati scanned rolls) keep their printed serial and
+    // get the photo embedded; everything else keeps the existing export format.
+    const withPhotos = hasStoredPhotos(voters);
+    const isGujarati = voters.some((v) => /[\u0A80-\u0AFF]/.test(v.nameHi || ''));
+    const localLabel = isGujarati ? 'Gujarati' : 'Hindi';
+    const exportSheet = addSheet(workbook, 'Export', voters.map((v, index) => ({
       'EPIC No': v.epic,
       'Ward': v.wardNo,
       'Part': v.partNo,
-      'Serial No': index + 1,
+      'Serial No': withPhotos ? v.serialNo : index + 1,
       'Name (English)': v.nameEn,
-      'Name (Hindi)': v.nameHi,
+      [`Name (${localLabel})`]: v.nameHi,
       'Age': v.age,
       'Gender': v.gender,
       'Relation': v.relationType,
       'Relative Name (English)': v.relativeNameEn,
-      'Relative Name (Hindi)': v.relativeNameHi,
+      [`Relative Name (${localLabel})`]: v.relativeNameHi,
       'House No': (!v.houseNo || ["'-", "-", "0", "000"].includes(String(v.houseNo).trim())) ? '' : String(v.houseNo).replace(/['"]/g, '').trim(),
       'Mobile': v.mobileNo,
       'Caste': v.caste,
       'Status': v.supportStatus,
       'Voted': v.voted ? 'Yes' : 'No'
     })));
+    if (withPhotos) await embedVoterPhotos(workbook, exportSheet, voters);
     
     await sendWorkbook(res, workbook, `Export_${dataset}`);
   } catch (err) {

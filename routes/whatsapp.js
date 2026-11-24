@@ -1340,6 +1340,8 @@ router.get('/history', verifyToken, requireModule('voters'), async (req, res) =>
     const targetOrgId = getEffectiveOrgId(req);
     if (targetOrgId) {
       query.organizationId = targetOrgId;
+    } else if (req.user?.hiddenOrgIds?.length) {
+      query.organizationId = { $nin: req.user.hiddenOrgIds };
     }
 
     const dispatches = await SlipDispatch.find(query).sort({ createdAt: -1 }).limit(100).lean();
@@ -2591,6 +2593,8 @@ router.get('/campaign/history', verifyToken, async (req, res) => {
     };
     if (orgId) {
       query.organizationId = orgId;
+    } else if (req.user?.hiddenOrgIds?.length) {
+      query.organizationId = { $nin: req.user.hiddenOrgIds };
     }
 
     const { search, status, campaignName } = req.query;
