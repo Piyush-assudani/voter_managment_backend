@@ -921,6 +921,9 @@ router.get('/export.xlsx', async (req, res) => {
     const withPhotos = hasStoredPhotos(voters);
     const isGujarati = voters.some((v) => /[\u0A80-\u0AFF]/.test(v.nameHi || ''));
     const localLabel = isGujarati ? 'Gujarati' : 'Hindi';
+    // Gujarati panels also get gender / relation / status words in Gujarati.
+    const GU_WORDS = { 'पुरुष': 'પુરુષ', 'स्त्री': 'સ્ત્રી', 'महिला': 'સ્ત્રી', 'पिता': 'પિતા', 'पति': 'પતિ', 'माता': 'માતા', 'अन्य': 'અન્ય', 'पत्नी': 'પત્ની' };
+    const gu = (value) => (isGujarati && GU_WORDS[value]) || value;
     const exportSheet = addSheet(workbook, 'Export', voters.map((v, index) => ({
       'EPIC No': v.epic,
       'Ward': v.wardNo,
@@ -929,8 +932,8 @@ router.get('/export.xlsx', async (req, res) => {
       'Name (English)': v.nameEn,
       [`Name (${localLabel})`]: v.nameHi,
       'Age': v.age,
-      'Gender': v.gender,
-      'Relation': v.relationType,
+      'Gender': gu(v.gender),
+      'Relation': gu(v.relationType),
       'Relative Name (English)': v.relativeNameEn,
       [`Relative Name (${localLabel})`]: v.relativeNameHi,
       'House No': (!v.houseNo || ["'-", "-", "0", "000"].includes(String(v.houseNo).trim())) ? '' : String(v.houseNo).replace(/['"]/g, '').trim(),
